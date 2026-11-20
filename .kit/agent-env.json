@@ -1,0 +1,13 @@
+{
+  "detectedAt": "2026-11-21",
+  "tools": {
+    "claude-code": {
+      "detected": true,
+      "version": "2.1.329 (Claude Code)"
+    },
+    "antigravity": {
+      "detected": false,
+      "version": null
+    }
+  }
+}

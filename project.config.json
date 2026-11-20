@@ -1,0 +1,49 @@
+{
+  "project": "art-studio",
+  "repos": [
+    {
+      "name": "art-studio",
+      "path": ".",
+      "traits": [
+        "docs"
+      ]
+    }
+  ],
+  "sensitive": false,
+  "public": false,
+  "containerDirs": [
+    "specs",
+    "docs",
+    "tools",
+    "tests"
+  ],
+  "gatedPaths": [],
+  "checks": [
+    "links"
+  ],
+  "branchPattern": "task/art-studio-{N}",
+  "fileLineLimits": {
+    "soft": 1200,
+    "hard": 1800
+  },
+  "workerLimits": {
+    "maxTickets": 3,
+    "maxBusinessLines": 2000,
+    "rotateAfterTickets": 12,
+    "rotateAfterHours": 8,
+    "heartbeatAliveMinutes": 15
+  },
+  "codeRules": {
+    "headerTags": [
+      "@module",
+      "@role",
+      "@forbid"
+    ],
+    "forbiddenPatterns": [],
+    "generatedPaths": []
+  },
+  "docRules": {
+    "registries": []
+  },
+  "acceptCommands": []
+}

@@ -1,0 +1,30 @@
+{
+  "$comment": "各 agent 工具讀規則檔的上限。上限會隨工具版本改變：查證日期超過 90 天，task agent-check 會提醒重新核對 source；有變就更新這裡並用 task propose 回報。",
+  "tools": {
+    "claude-code": {
+      "label": "Claude Code",
+      "rulesFiles": ["CLAUDE.md", "CLAUDE.local.md"],
+      "followImports": true,
+      "limits": [
+        { "id": "cc-launch-file", "scope": "each", "unit": "bytes", "max": 4194304, "effect": "skip", "note": "啟動時載入的 CLAUDE.md 超過 4 MiB 會整份跳過" },
+        { "id": "cc-size-warning", "scope": "each", "unit": "chars", "max": 40000, "effect": "warn", "note": "超過 40,000 字元會出現效能警告；子資料夾與 @ 引入的檔案也有單檔上限，超過只讀開頭" },
+        { "id": "cc-lines-advice", "scope": "each", "unit": "lines", "max": 200, "effect": "advice", "note": "官方建議每個檔案 200 行以內" }
+      ],
+      "source": "https://code.claude.com/docs/en/memory",
+      "checkedAt": "2026-11-19",
+      "detect": { "command": "claude", "versionArgs": ["--version"], "homePaths": [".claude"] }
+    },
+    "antigravity": {
+      "label": "Antigravity",
+      "rulesFiles": ["AGENTS.md", "GEMINI.md", ".agents/rules/*.md"],
+      "followImports": false,
+      "limits": [
+        { "id": "ag-rule-file", "scope": "each", "unit": "bytes", "max": 24000, "effect": "truncate", "note": "單一規則檔超過 24,000 bytes 會被無聲截斷" },
+        { "id": "ag-rules-budget", "scope": "total", "unit": "tokens", "max": 20000, "effect": "budget", "note": "所有生效中的規則檔共用 20,000 token（估計值）" }
+      ],
+      "source": "https://antigravity.google/docs/rules",
+      "checkedAt": "2026-11-19",
+      "detect": { "command": null, "versionArgs": [], "homePaths": [".gemini/antigravity"] }
+    }
+  }
+}
