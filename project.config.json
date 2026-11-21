@@ -63,6 +63,38 @@
         "mustAppearIn": [
           "docs/roadmap.md"
         ]
+      },
+      {
+        "id": "skill",
+        "files": "skills/*.md",
+        "when": "^\\| 版本 \\|",
+        "mustAppearIn": [
+          "skills/README.md"
+        ]
+      },
+      {
+        "id": "prompt-template",
+        "files": "prompts/*.md",
+        "when": "^\\| 版本 \\|",
+        "mustAppearIn": [
+          "prompts/README.md"
+        ]
+      },
+      {
+        "id": "prompt-batch",
+        "files": "prompts/batches/*.md",
+        "when": "需求來源",
+        "mustAppearIn": [
+          "prompts/README.md"
+        ]
+      },
+      {
+        "id": "style",
+        "files": "styles/*.md",
+        "when": "^\\| 版本 \\|",
+        "mustAppearIn": [
+          "styles/README.md"
+        ]
       }
     ]
   },

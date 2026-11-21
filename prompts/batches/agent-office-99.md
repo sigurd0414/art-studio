@@ -1,5 +1,7 @@
 # agent-office 第三批提示詞與交付表
 
+範本：[prompts/agent-office.md](../agent-office.md) 版本 1.1。
+
 版本：1.1（門西牆角度重修）。最後確認日期：2026-11-21。
 
 需求來源：[agent-office#99](https://github.com/sigurd0414/agent-office/issues/99)，部門需求：[art-studio#1](https://github.com/sigurd0414/art-studio/issues/1)。本檔為部門保留的提示詞資產，成品只交需求方 media 分支。
@@ -8,7 +10,7 @@
 
 使用 Codex 內建 image_gen，一次一件；初版附 reference-office 風格圖與第一批物件。門重修改附舊門作西牆方向參考、第一批櫃子作風格參考，後續開門格附新版前格與關門格。同組動畫附前一格。沒有程式呼叫生圖 API、沒有付費素材包，也沒有從參考圖切圖或描圖。
 
-原圖原檔保留。去背僅以洋紅色鍵設透明及裁透明邊框，所有留下的 RGBA 樣本均與原圖相同。不取格、不換色、不限色、不加外框、不縮放。通用方法見 `skills/gpt-original-cutout.md`；來源與使用條款見 `styles/agent-office.md`。
+原圖原檔保留。去背僅以洋紅色鍵設透明及裁透明邊框，所有留下的 RGBA 樣本均與原圖相同。不取格、不換色、不限色、不加外框、不縮放。通用方法見 `../../skills/gpt-original-cutout.md`；來源與使用條款見 `../../styles/agent-office.md`。
 
 ## 交付位置與尺寸
 
