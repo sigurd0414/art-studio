@@ -4,7 +4,7 @@
 | :--- | :--- |
 | 依據 | [ADR-001](../docs/adr/ADR-001-department-assets.md) |
 | 負責 | art-studio 總規劃（claude.ai 專案「art-studio」的對話，https://claude.ai/code/session_014wJVwstFL3pSvKBbsbftWQ） |
-| 狀態 | 進行中 |
+| 狀態 | ✅ 完成（2026-11-21） |
 | 最後確認 | 2026-11-21 |
 
 ## 1. 目標
@@ -81,6 +81,8 @@ project.config.json
 **為什麼**：第三批的門（art-studio#1）和第四批 8 件牆面物件（art-studio#2）都因「貼在哪面牆、角度對不對」被需求方退回一次，畫風與比例都沒問題。原因有兩個：共用前綴 1.1 固定寫 `facing bottom-left`，沒有依牆面換方向；交件前也沒有拿需求方場景裡同一面牆的物件並排比對。第二次重交時 G1 附了「與北牆對照物同張」的檢查圖，一次就通過，這個做法要變成固定流程。
 
 **要先完成**：〔T1〕（art-studio#3，已合併）。
+
+**結果**：✅ 2026-11-21 18:1x 合併（驗收證據包 PASS，驗收員 A1-V 逐條通過）。本任務已凍結。
 
 **要做的事**
 
