@@ -78,5 +78,10 @@
     "name": "kind:no-commit",
     "color": "e4e669",
     "description": "不產生提交的雜務單"
+  },
+  {
+    "name": "merge:auto",
+    "color": "0e8a16",
+    "description": "驗收 PASS 後由協調者自動合併"
   }
 ]

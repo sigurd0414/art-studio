@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { evaluateMainAutoSync, getLabelNames, parseGitAheadBehind } from '../lib.ts';
-import type { GitHubComment, GitHubIssue, TaskContext, WaitCommandArgs } from '../types.ts';
+import type { GitHubComment, GitHubIssue, TaskContext, WaitCommandArgs, WorkerLimits, WorkerRole } from '../types.ts';
 import {
   TaskFailure,
   fetchAllIssues,
@@ -20,6 +20,7 @@ import {
 } from './runtime.ts';
 import {
   acquireWorkerLease,
+  evaluateTicketTakeover,
   loadWorkerLimits,
   releaseWorkerLease,
   stepWorkerBeforeWaitRound,
@@ -39,13 +40,28 @@ const EXIT_CODE = Object.freeze({
   LEASE_IN_USE: 8,
 });
 
+type CandidateKind = 'takeover' | 'rework' | 'ready';
+
+const KIND_PRIORITY: Readonly<Record<CandidateKind, number>> = Object.freeze({
+  takeover: 0,
+  rework: 1,
+  ready: 2,
+});
+
 interface CandidateIssue {
   issue: GitHubIssue;
   isBlocker: boolean;
-  isRework: boolean;
+  kind: CandidateKind;
 }
 
 type MatchedCandidate =
+  | {
+      kind: 'takeover';
+      issue: GitHubIssue;
+      prevWorker: string;
+      prevRole: WorkerRole;
+      prevHeartbeatAt: string;
+    }
   | { kind: 'resume'; issue: GitHubIssue; pendingComments: GitHubComment[] }
   | { kind: 'start'; issue: GitHubIssue; dispatchComment: GitHubComment | null };
 
@@ -163,34 +179,68 @@ function sortCandidateIssues(allIssues: readonly GitHubIssue[]): CandidateIssue[
   for (const issue of allIssues) {
     if (!issue || typeof issue !== 'object' || issue.state !== 'open') continue;
     const labels = getLabelNames(issue);
-    if (labels.includes('status:in-progress')) continue;
+    const isInProgress = labels.includes('status:in-progress');
     const isRework = labels.includes('status:rework');
+    const isFixed = labels.includes('status:fixed');
     const isReady = labels.includes('status:ready');
-    if (!isRework && !isReady) continue;
+
+    let kind: CandidateKind | null = null;
+    if (isInProgress && !isRework && !isFixed) {
+      kind = 'takeover';
+    } else if (!isInProgress && isRework) {
+      kind = 'rework';
+    } else if (!isInProgress && isReady) {
+      kind = 'ready';
+    }
+    if (!kind) continue;
+
     candidates.push({
       issue,
       isBlocker: labels.includes('severity:blocker'),
-      isRework,
+      kind,
     });
   }
   candidates.sort((a, b) => {
     if (a.isBlocker !== b.isBlocker) return a.isBlocker ? -1 : 1;
-    if (a.isRework !== b.isRework) return a.isRework ? -1 : 1;
+    if (a.kind !== b.kind) return KIND_PRIORITY[a.kind] - KIND_PRIORITY[b.kind];
     return a.issue.number - b.issue.number;
   });
   return candidates;
 }
 
-function findNextCandidate(ctx: TaskContext, seenSkipped: Set<number>): MatchedCandidate | null {
+function findNextCandidate(
+  ctx: TaskContext,
+  worker: string,
+  limits: WorkerLimits,
+  seenSkipped: Set<number>,
+): MatchedCandidate | null {
   const allIssues = fetchAllIssues(ctx);
   const issuesByNumber = new Map<number, GitHubIssue>(allIssues.map((it) => [it.number, it]));
   const candidates = sortCandidateIssues(allIssues);
 
   for (const item of candidates) {
-    const { issue, isRework } = item;
+    const { issue, kind } = item;
+    if (kind === 'takeover') {
+      const takeover = evaluateTicketTakeover(ctx.worktreeRoot, issue, worker, limits);
+      if (takeover.ok) {
+        return {
+          kind: 'takeover',
+          issue,
+          prevWorker: takeover.prevWorker,
+          prevRole: takeover.prevRole,
+          prevHeartbeatAt: takeover.prevHeartbeatAt,
+        };
+      }
+      if (!seenSkipped.has(issue.number)) {
+        console.log(`SKIP #${issue.number}：${takeover.reason}`);
+        seenSkipped.add(issue.number);
+      }
+      continue;
+    }
+
     const comments = fetchIssueComments(ctx, issue.number);
 
-    if (isRework) {
+    if (kind === 'rework') {
       const check = ctx.lib.evaluateIssueCanResume(issue, { comments });
       if (check.ok) {
         return { kind: 'resume', issue, pendingComments: check.pendingComments };
@@ -222,6 +272,16 @@ function findNextCandidate(ctx: TaskContext, seenSkipped: Set<number>): MatchedC
 function printMatchedCandidate(candidate: MatchedCandidate): void {
   console.log(`NEXT_ISSUE=${candidate.issue.number}`);
   console.log(`NEXT_KIND=${candidate.kind}`);
+  if (candidate.kind === 'takeover') {
+    console.log(`PREV_WORKER=${candidate.prevWorker}`);
+    console.log('---');
+    const stateDesc =
+      candidate.prevRole === 'retired'
+        ? `已退休（最後心跳 ${candidate.prevHeartbeatAt}）`
+        : `最後心跳 ${candidate.prevHeartbeatAt}`;
+    console.log(`前一位協調者 ${candidate.prevWorker} ${stateDesc}，請用 resume 接手 #${candidate.issue.number}。`);
+    return;
+  }
   console.log('---');
   if (candidate.kind === 'start') {
     console.log(candidate.dispatchComment?.body ?? '');
@@ -283,7 +343,7 @@ async function runWaitForNextIssue(
       }
 
       try {
-        const matched = findNextCandidate(ctx, seenSkipped);
+        const matched = findNextCandidate(ctx, worker, limits, seenSkipped);
         consecutiveFailures = 0;
         if (matched) {
           printMatchedCandidate(matched);

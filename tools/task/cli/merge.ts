@@ -1,12 +1,12 @@
 // @module templates/bin/task/cli/merge
-// @role 通用 task 工具的合併指令模組：實作 task merge（驗證交件與證據包一致後於暫存工作資料夾合併推上 main 並關單）
-// @why 讓規劃者在審查證據包後以單一指令安全完成多倉庫合併、留言與關單，不動主資料夾且失敗時可追溯
-// @forbid 禁止在未通過交件與證據包驗證前寫入 GitHub 或推送、在主資料夾切換分支，或於任一倉庫失敗後仍留言關單
+// @role 通用 task 工具的合併指令模組：實作 task merge（規劃者合併，及帶 --worker／TASK_WORKER 時的低風險單自動合併）
+// @why 讓規劃者與符合低風險條件的協調者在驗證證據包、逐條對照與路徑安全後以單一指令於暫存工作資料夾合併推上 main 並關單，不動主資料夾
+// @forbid 禁止在未通過交件、證據包與逐條對照（及自動合併全部條件）前寫入 GitHub 或推送、在主資料夾切換分支，或於任一倉庫失敗後仍留言關單
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getLabelNames } from '../lib.ts';
+import { getLabelNames, segmentListsOverlap } from '../lib.ts';
 import type {
   GitHubComment,
   GitHubIssue,
@@ -14,19 +14,26 @@ import type {
   RuntimeRepo,
   TaskContext,
 } from '../types.ts';
+import { computeMarkdownFencedLines, normalizePattern, parseNameStatusZ } from './docs.ts';
+import { parseGatedPaths, type GateChangeType, type GateRule } from './gate.ts';
+import { DEFAULT_PROTECTED_PATHS } from './precheck.ts';
 import {
+  CliUsageError,
   fail,
   fetchIssueComments,
   fetchSingleIssue,
   postIssueComment,
   removeIssueLabel,
+  resolveMergeBase,
   runGh,
   runGit,
+  usageError,
 } from './runtime.ts';
 
 const ORIGIN_MAIN_REF = 'refs/remotes/origin/main';
 const DELIVER_LINE_RE = /^\s*-\s+`?([^`:：\s]+)`?\s*[:：]\s*`?([^\s`]+)`?\s+@\s+`?([0-9a-fA-F]{7,40})`?\s*$/;
 const EVIDENCE_HEADING_RE = /^##\s+驗收證據包\s*[:：]\s*#(\d+)\s*→\s*(\S+)\s*$/;
+const REVIEW_HEADING_RE = /^##\s+逐條驗收對照\s*[:：]\s*#(\d+) → (PASS|FAIL)\s*$/;
 const ROLE_PAIR_ROW_RE = /^\|\s*驗收員代號\s*[／/]\s*交件者代號\s*\|\s*(.+?)\s*\|\s*$/;
 const REPO_HEADING_RE = /^###\s+倉庫\s*[:：].*[（(]\s*`?([^`)）\s]+)`?\s*[）)]\s*$/;
 const BRANCH_COMMIT_ROW_RE = /^\|\s*分支\s*commit\s*\|\s*`?([0-9a-fA-F]{7,40})`?\s*\|\s*$/;
@@ -56,7 +63,22 @@ interface ParsedEvidence {
   repoCommits: Map<string, string>;
 }
 
+interface ParsedReview {
+  verdict: 'PASS' | 'FAIL' | null;
+  hasUserConfirmRow: boolean;
+}
+
+interface AutoMergeRuleSets {
+  gatedRules: GateRule[];
+  protectedRules: GateRule[];
+  denyRules: GateRule[];
+}
+
 type ValidationOutcome = { ok: true } | { ok: false; reason: string };
+
+type EvidenceValidationResult =
+  | { ok: false; reason: string }
+  | { ok: true; evidenceIdx: number; rolePair: RolePair };
 
 type MergePreconditionResult =
   | { ok: false; code: number }
@@ -241,20 +263,22 @@ function findAndValidateEvidence(
   issueNum: number,
   override: string | null,
   deliveredByKey: ReadonlyMap<string, DeliveredRepoCommit>,
-): ValidationOutcome {
+): EvidenceValidationResult {
   const afterDelivery = sortedComments.slice(lastDeliverIdx + 1);
   let latestParsed: ParsedEvidence | null = null;
+  let latestEvidenceIdx = -1;
 
-  for (const comment of afterDelivery) {
-    const lines = normalizeLines(comment.body);
+  for (let i = 0; i < afterDelivery.length; i += 1) {
+    const lines = normalizeLines(afterDelivery[i].body);
     if (!lines[0].trimStart().startsWith('🧪')) continue;
     const parsed = parseEvidenceComment(lines, issueNum);
     if (parsed.verdict !== null) {
       latestParsed = parsed;
+      latestEvidenceIdx = lastDeliverIdx + 1 + i;
     }
   }
 
-  if (!latestParsed) {
+  if (!latestParsed || latestEvidenceIdx === -1) {
     return { ok: false, reason: `交件後找不到 #${issueNum} 的驗收證據包` };
   }
 
@@ -289,6 +313,176 @@ function findAndValidateEvidence(
     }
   }
 
+  return { ok: true, evidenceIdx: latestEvidenceIdx, rolePair: latestParsed.rolePair };
+}
+
+function parseGateField(raw: unknown, repos: readonly RuntimeRepo[], fieldName: string): GateRule[] {
+  try {
+    return parseGatedPaths(raw, repos);
+  } catch (err: unknown) {
+    if (err instanceof CliUsageError && fieldName !== 'gatedPaths') {
+      usageError(err.message.replace(/gatedPaths/g, fieldName));
+    }
+    throw err;
+  }
+}
+
+function parseAutoMergeRuleSets(ctx: TaskContext): AutoMergeRuleSets {
+  const rawDeny = ctx.config.autoMergeDenyPaths;
+  if (rawDeny !== undefined && (!Array.isArray(rawDeny) || rawDeny.some((item) => typeof item !== 'string'))) {
+    usageError('設定檔錯誤：autoMergeDenyPaths 必須是字串陣列');
+  }
+  const rawProtected = ctx.config.protectedPaths;
+  if (
+    rawProtected !== undefined &&
+    rawProtected !== null &&
+    (!Array.isArray(rawProtected) || rawProtected.some((item) => typeof item !== 'string' || !item.trim()))
+  ) {
+    usageError('設定檔錯誤：protectedPaths 必須是非空字串陣列');
+  }
+  return {
+    gatedRules: parseGateField(ctx.config.gatedPaths, ctx.repos, 'gatedPaths'),
+    protectedRules: parseGateField([...DEFAULT_PROTECTED_PATHS, ...(rawProtected ?? [])], ctx.repos, 'protectedPaths'),
+    denyRules: parseGateField(rawDeny, ctx.repos, 'autoMergeDenyPaths'),
+  };
+}
+
+function statusToChangeType(status: string): GateChangeType {
+  if (status === 'A') return 'add';
+  if (status === 'D') return 'delete';
+  return 'modify';
+}
+
+function matchesGateRules(
+  rules: readonly GateRule[],
+  repoKey: string,
+  fileSegs: readonly string[],
+  changeType: GateChangeType,
+): boolean {
+  const ruleHits = (rule: GateRule): boolean => {
+    if (rule.repoKey !== null && rule.repoKey !== repoKey) return false;
+    if (rule.on !== 'any' && rule.on !== changeType) return false;
+    return rule.variants.some((patSegs) => segmentListsOverlap(fileSegs, patSegs));
+  };
+  return rules.some((r) => !r.negated && ruleHits(r)) && !rules.some((r) => r.negated && ruleHits(r));
+}
+
+function checkAutoMergeDeniedPaths(
+  deliveredRepos: readonly DeliveredRepoItem[],
+  rules: AutoMergeRuleSets,
+): ValidationOutcome {
+  const gatedHits: string[] = [];
+  const protectedHits: string[] = [];
+  const denyHits: string[] = [];
+
+  for (const item of deliveredRepos) {
+    const originMainRes = runGit(item.repo.mainRepoPath, ['rev-parse', '--verify', '-q', ORIGIN_MAIN_REF]);
+    if (!originMainRes.ok) {
+      return { ok: false, reason: `無法讀取 ${item.repo.name} 的 origin/main commit` };
+    }
+    const mergeBase = resolveMergeBase(item.repo.mainRepoPath, originMainRes.stdout.trim(), item.commitSha);
+    if (!mergeBase) {
+      return { ok: false, reason: `無法計算 ${item.repo.name} 的交件 commit 與 origin/main 的 merge-base` };
+    }
+    const diffRes = runGit(item.repo.mainRepoPath, [
+      '-c',
+      'core.quotepath=false',
+      'diff',
+      '--no-renames',
+      '--name-status',
+      '-z',
+      `${mergeBase}..${item.commitSha}`,
+    ]);
+    if (!diffRes.ok) {
+      return {
+        ok: false,
+        reason: `比對 ${item.repo.name} 的交件差異失敗：${diffRes.stderr || diffRes.stdout || '未知錯誤'}`,
+      };
+    }
+
+    for (const entry of parseNameStatusZ(diffRes.stdout)) {
+      const fileSegs = normalizePattern(entry.filePath).split('/').filter(Boolean);
+      if (fileSegs.length === 0) continue;
+      const changeType = statusToChangeType(entry.status);
+      const label = `${item.repo.key}:${entry.filePath}`;
+      if (matchesGateRules(rules.gatedRules, item.repo.key, fileSegs, changeType)) gatedHits.push(label);
+      if (matchesGateRules(rules.protectedRules, item.repo.key, fileSegs, changeType)) protectedHits.push(label);
+      if (matchesGateRules(rules.denyRules, item.repo.key, fileSegs, changeType)) denyHits.push(label);
+    }
+  }
+
+  const parts: string[] = [];
+  if (gatedHits.length > 0) parts.push(`門檻區域（${gatedHits.join('、')}）`);
+  if (protectedHits.length > 0) parts.push(`受保護檔案（${protectedHits.join('、')}）`);
+  if (denyHits.length > 0) parts.push(`禁止自動合併路徑（${denyHits.join('、')}）`);
+  if (parts.length > 0) {
+    return { ok: false, reason: `交件改動落在不可自動合併的路徑：${parts.join('；')}` };
+  }
+  return { ok: true };
+}
+
+function parseReviewComment(lines: readonly string[], issueNum: number): ParsedReview {
+  const fenced = computeMarkdownFencedLines(lines);
+  let verdict: 'PASS' | 'FAIL' | null = null;
+  let hasUserConfirmRow = false;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (fenced[i]) continue;
+    const trimmed = lines[i].trim();
+    if (verdict === null) {
+      const headingMatch = REVIEW_HEADING_RE.exec(trimmed);
+      if (headingMatch && Number(headingMatch[1]) === issueNum) {
+        verdict = headingMatch[2] === 'PASS' ? 'PASS' : 'FAIL';
+        continue;
+      }
+    }
+    if (trimmed.startsWith('|') && trimmed.includes('待使用者確認')) {
+      hasUserConfirmRow = true;
+    }
+  }
+
+  return { verdict, hasUserConfirmRow };
+}
+
+/**
+ * 檢查最新驗收證據包之後的驗收員逐條對照留言（與自動合併／規劃者合併共用）。
+ * @why 讓規劃者與協調者合併共用同一套標題與表格解析，只依是否自動合併決定是否擋下「待使用者確認」與錯誤提示語氣。
+ */
+function findAndValidateReview(
+  ctx: TaskContext,
+  sortedComments: readonly GitHubComment[],
+  evidenceIdx: number,
+  issueNum: number,
+  { isAutoMerge }: { isAutoMerge: boolean },
+): ValidationOutcome {
+  let latestReview: ParsedReview | null = null;
+  for (const comment of sortedComments.slice(evidenceIdx + 1)) {
+    if (ctx.lib.commentRole(comment) !== 'verifier') continue;
+    const parsed = parseReviewComment(normalizeLines(comment.body), issueNum);
+    if (parsed.verdict !== null) {
+      latestReview = parsed;
+    }
+  }
+
+  if (!latestReview) {
+    return {
+      ok: false,
+      reason: isAutoMerge
+        ? `證據包之後找不到 #${issueNum} 的驗收員逐條對照留言（需含「## 逐條驗收對照：#${issueNum} → PASS」）`
+        : `#${issueNum} 的驗收員逐條對照（含視覺審查）還沒出來或不是 PASS（需在證據包之後附「## 逐條驗收對照：#${issueNum} → PASS」，或加 --override "<理由>"）`,
+    };
+  }
+  if (latestReview.verdict !== 'PASS') {
+    return {
+      ok: false,
+      reason: isAutoMerge
+        ? `最新一則逐條驗收對照結果為 ${latestReview.verdict}，協調者不能自動合併`
+        : `#${issueNum} 的驗收員逐條對照（含視覺審查）還沒出來或不是 PASS（最新一則為 ${latestReview.verdict}，或加 --override "<理由>"）`,
+    };
+  }
+  if (isAutoMerge && latestReview.hasUserConfirmRow) {
+    return { ok: false, reason: '最新一則逐條驗收對照含有「待使用者確認」，須交由使用者與規劃者合併' };
+  }
   return { ok: true };
 }
 
@@ -339,6 +533,8 @@ function validateMergePreconditions(
   ctx: TaskContext,
   issueNum: number,
   override: string | null,
+  worker: string,
+  autoMergeRules: AutoMergeRuleSets | null,
 ): MergePreconditionResult {
   const reject = (reason: string): MergePreconditionResult => {
     console.error(`拒絕合併：${reason}`);
@@ -352,8 +548,19 @@ function validateMergePreconditions(
   if (target.state !== 'open') {
     return reject(`issue #${issueNum} 已關閉（目前狀態：${target.state}）`);
   }
-  if (!getLabelNames(target).includes('status:fixed')) {
+  const labels = getLabelNames(target);
+  if (!labels.includes('status:fixed')) {
     return reject(`issue #${issueNum} 沒有 status:fixed 標籤`);
+  }
+
+  if (worker) {
+    if (!labels.includes('merge:auto')) {
+      return reject(`issue #${issueNum} 沒有 merge:auto 標籤，協調者不能自動合併`);
+    }
+    const blockedLabels = labels.filter((l) => l.startsWith('role:') || l.startsWith('needs:'));
+    if (blockedLabels.length > 0) {
+      return reject(`issue #${issueNum} 帶有禁止自動合併的標籤（${blockedLabels.join('、')}）`);
+    }
   }
 
   const sortedComments = sortCommentsChronologically(fetchIssueComments(ctx, issueNum));
@@ -373,6 +580,27 @@ function validateMergePreconditions(
     return reject(evidenceCheck.reason);
   }
 
+  const hasOverride = Boolean(override && override.trim());
+  if (worker) {
+    if (evidenceCheck.rolePair.deliverer !== worker) {
+      return reject(
+        `合併者代號（${worker}）必須與交件者代號（${evidenceCheck.rolePair.deliverer}）相同`,
+      );
+    }
+    if (evidenceCheck.rolePair.verifier === worker) {
+      return reject(`驗收員代號（${evidenceCheck.rolePair.verifier}）不可與合併者代號（${worker}）相同`);
+    }
+  }
+
+  if (worker || !hasOverride) {
+    const reviewCheck = findAndValidateReview(ctx, sortedComments, evidenceCheck.evidenceIdx, issueNum, {
+      isAutoMerge: Boolean(worker),
+    });
+    if (!reviewCheck.ok) {
+      return reject(reviewCheck.reason);
+    }
+  }
+
   if (delivery.noCommit) {
     return { ok: true, noCommit: true, target, deliveredRepos: [] };
   }
@@ -385,6 +613,13 @@ function validateMergePreconditions(
   const remoteCheck = verifyRemoteBranches(deliveredRepos);
   if (!remoteCheck.ok) {
     return reject(remoteCheck.reason);
+  }
+
+  if (worker && autoMergeRules) {
+    const pathCheck = checkAutoMergeDeniedPaths(deliveredRepos, autoMergeRules);
+    if (!pathCheck.ok) {
+      return reject(pathCheck.reason);
+    }
   }
 
   return { ok: true, noCommit: false, target, deliveredRepos };
@@ -483,15 +718,15 @@ function finalizeMergedIssue(
   issueNum: number,
   mergedResults: readonly MergedRepoCommit[],
   override: string | null,
+  worker: string,
   { noCommit = false }: { noCommit?: boolean } = {},
 ): void {
+  const headerLines = worker
+    ? [`🛠️ ${worker}`, '🔀 自動合併（merge:auto）']
+    : ['🤖 Claude', noCommit ? '✅ 驗收通過（零提交），關單。' : '✅ 驗收通過，已合併 main 並關單。'];
   const commentLines = noCommit
-    ? ['🤖 Claude', '✅ 驗收通過（零提交），關單。']
-    : [
-        '🤖 Claude',
-        '✅ 驗收通過，已合併 main 並關單。',
-        ...mergedResults.map((r) => `- ${r.key}：${r.mergeCommitSha.slice(0, 7)}`),
-      ];
+    ? headerLines
+    : [...headerLines, ...mergedResults.map((r) => `- ${r.key}：${r.mergeCommitSha.slice(0, 7)}`)];
   if (override) {
     commentLines.push(`覆核理由：${override}`);
   }
@@ -516,17 +751,24 @@ function finalizeMergedIssue(
 }
 
 /**
- * 執行 `task merge`：驗證交件與證據包一致後於暫存工作資料夾合併推上 main 並關單。
+ * 執行 `task merge`：驗證交件、證據包與逐條對照一致（帶 --worker 時套用自動合併全部條件）後於暫存工作資料夾合併推上 main 並關單。
  */
 export function cmdMerge(
   ctx: TaskContext,
   {
     issueNum,
+    worker = '',
     dryRun = false,
     override = null,
-  }: Pick<MergeCommandArgs, 'issueNum'> & { dryRun?: boolean; override?: string | null },
+  }: Pick<MergeCommandArgs, 'issueNum'> & { worker?: string; dryRun?: boolean; override?: string | null },
 ): number {
-  const check = validateMergePreconditions(ctx, issueNum, override);
+  const effectiveWorker = worker.trim();
+  if (effectiveWorker && override !== null) {
+    usageError('用法錯誤：協調者自動合併不支援 --override');
+  }
+  const autoMergeRules = effectiveWorker ? parseAutoMergeRuleSets(ctx) : null;
+
+  const check = validateMergePreconditions(ctx, issueNum, override, effectiveWorker, autoMergeRules);
   if (!check.ok) {
     return check.code;
   }
@@ -543,7 +785,7 @@ export function cmdMerge(
   }
 
   if (check.noCommit) {
-    finalizeMergedIssue(ctx, check.target, issueNum, [], override, { noCommit: true });
+    finalizeMergedIssue(ctx, check.target, issueNum, [], override, effectiveWorker, { noCommit: true });
     return 0;
   }
 
@@ -562,6 +804,6 @@ export function cmdMerge(
     mergedResults.push({ key: item.repo.key, mergeCommitSha: mergeRes.mergeCommitSha });
   }
 
-  finalizeMergedIssue(ctx, check.target, issueNum, mergedResults, override);
+  finalizeMergedIssue(ctx, check.target, issueNum, mergedResults, override, effectiveWorker);
   return 0;
 }

@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 | :--- | :--- |
-| 版本 | 由初始化套件 v0.2.7 產生 |
+| 版本 | 由初始化套件 v0.2.11 產生 |
 | 適用 | art-studio |
 
 本協議只寫「工具管不到、要靠人或 agent 自己做對的事」。工具會自動擋下的檢查（範圍重疊、前置未完成、鎖定檔被改），以工具的錯誤訊息為準。
@@ -21,6 +21,7 @@
 | 範圍 | `scope:broad`（大範圍單，需說明理由） |
 | 急單 | `priority:rush` |
 | 種類 | `kind:no-commit`（只整理本機環境、不產生提交的雜務單） |
+| 審查門檻 | `merge:auto`（驗收 PASS 後由協調者自動合併；僅限未改門檻區域、保護檔、自動合併禁止路徑，且無需使用者看圖或核准的單） |
 | 倉庫（多倉庫專案才用） | `repo:<代號>`，代號見 `project.config.json` |
 
 同一張單同一時間只能有一個 `status:*` 標籤。
@@ -76,20 +77,20 @@ Claude 負責對話：<主題>（<對話連結>）
 | `{ "path": "app/**/*.ts", "on": "add" }` | 只有**新增**（含改名的新路徑）才算；`on` 預設 `"any"`（新增、修改、刪除都算） |
 
 - **開工與提交要求**：改到門檻區域的單，開工前單的內文必須有非空的 `## 驗收條件`，且有 `鎖定 commit：<sha>`（或 `## 鎖定的檔案` 以「無」開頭）。任務分支上每個改到門檻檔案的提交，訊息都要帶 `Refs: <project>#<單號>`。
-- **提交掛鉤（`gate-check`）**：可把 `node tools/task.mjs gate-check --staged --commit-msg "$1"` 接在 `commit-msg` 掛鉤，在本機不連 GitHub 即檢查；急修時主旨以 `hotfix:` 開頭放行（隔天補單），`Merge`、`Revert` 開頭同樣放行。也可用 `--range <基準>..<目標>` 與 `--repo <name>`（旁倉可設 `TASK_CONFIG` 指向設定檔）。
+- **提交掛鉤（`gate-check`）**：可把 `node tools/task.ts gate-check --staged --commit-msg "$1"` 接在 `commit-msg` 掛鉤，在本機不連 GitHub 即檢查；急修時主旨以 `hotfix:` 開頭放行（隔天補單），`Merge`、`Revert` 開頭同樣放行。也可用 `--range <基準>..<目標>` 與 `--repo <name>`（旁倉可設 `TASK_CONFIG` 指向設定檔）。
 - **驗收檢查**：`task accept` 會檢查門檻區域（驗收條件、鎖定紀錄、每個相關提交的 `Refs:`），在證據包列出「門檻區域」結果；其餘（非門檻檔案的小改或微調）可直接做，事後稽核。
 
 ## 5. 傳話（全部在 GitHub issue）
 
-- **派工**：Claude 加 `status:ready` 的同一步留派工留言，第一行 `🤖 Claude`、第二行 `📮 派工`。
+- **派工**：Claude 加 `status:ready` 的同一步留派工留言，第一行 `🤖 Claude`、第二行 `📮 派工`，並依影響範圍與風險決定是否加上 `merge:auto`（只給沒碰門檻區域、保護檔或 `autoMergeDenyPaths`，無 `role:*` 與 `needs:*` 標籤，且不需要使用者看圖或核准的低風險單）。
 - **提問**：實作者留言（第一行 `🛠️ <代號>`，寫清楚卡在哪、有哪些選項），然後執行 `task wait <N> --worker <代號>` 有上限地等回覆（自動切為 `blocked` 並持續送心跳；收到回覆時切回 `implementing`），不要停下來等人打字。
 - **回覆**：Claude 一則留言講完。
 - **交件**：`task submit <N>`（檢查範圍與行數、先跑規則檔保護與程式規則（沒過就拒絕交件並列出問題）、推任務分支、留「📦 交件」留言、標 `status:fixed`）。
 - **收工**：合併後 `task finish <N>` 清掉工作資料夾與任務分支。
 - **驗收**：
   1. 交件後由協調者另外叫起驗收員子代理（不得是實作的同一個子代理），跑 `task accept <N>`。工具在乾淨工作資料夾裡做範圍比對、鎖定檔比對（以單上的鎖定 commit 為準）、規則檔保護、必跑檢查（`acceptCommands` 在暫存區執行，暫存區不會自帶依賴，第一步放依賴安裝；跨倉庫的檢查用 `${ACCEPT_DIR}`／`TASK_ACCEPT_DIR` 找旁邊倉庫，不要從主資料夾推算）、暫時外部服務、效能量測，並把證據包張貼到單上（第一行 `🧪 驗收員`）。
-  2. 驗收員另寫一則留言，依驗收條件逐條對照；有畫面時一併做視覺審查。工具結果與它的判斷分開寫。
-  3. Claude 審證據包與程式差異是否合規格與架構；通過就用 `node tools/task.mjs merge <N>` 合併關單（證據包 FAIL 但判定是工具誤判時加 `--override "<理由>"`），不過就附編號問題清單改 `status:rework`。
+  2. 驗收員另寫一則留言，依驗收條件逐條對照；有畫面時一併做視覺審查。工具結果與它的判斷分開寫。固定格式：第一行 `🧪 驗收員`，接著一行標題 `## 逐條驗收對照：#<N> → PASS`（有任何一條「不通過」就寫 `→ FAIL`；全形或半形冒號皆可，箭頭前後各一個空白），再接逐條表格（狀態欄填「通過」、「不通過」或「待使用者確認」；有「待使用者確認」但其餘都通過時標題仍寫 `PASS`，由規劃者與使用者確認後合併）。
+  3. 單有 `merge:auto` 時，驗收 PASS 後由協調者自己執行 `node tools/task.ts merge <N> --worker <代號>`（不接受 `--override`；工具會檢查 `merge:auto`、無 `role:*`／`needs:*`、證據包與逐條對照皆 `PASS` 且無「待使用者確認」、未碰 `gatedPaths`／`protectedPaths`／`autoMergeDenyPaths`、交件者為自己且異於驗收員）；若工具拒絕或沒有 `merge:auto`，照常等 Claude 審證據包、逐條對照與程式差異後用 `node tools/task.ts merge <N>` 合併關單（規劃者合併前要有逐條對照，即最新證據包之後須有 `PASS` 的逐條驗收對照，含「待使用者確認」列仍可合併；證據包或逐條對照未通過／尚未出來但確定要先合併時可加 `--override "<理由>"`），不過就附編號問題清單改 `status:rework`。
   4. Claude 預設不重跑。只有證據包不對勁（數字對不上、結論和內容矛盾、工具報錯），或改到驗簽、權限、密鑰處理（以及有 `sensitive` 標記的倉庫）時才自己重跑。
   5. 效能數字一律由 `task accept` 在同一台機器量，證據包記下機器型號；不採用實作者自己量的數字。
   6. 退回 3 次轉回規劃（拆小或改規格）。
@@ -99,8 +100,8 @@ Claude 負責對話：<主題>（<對話連結>）
 
 目的：使用者只開一次常駐對話，之後不必逐張轉述。
 
-1. 協調者開場跑 `task worker-name` 領代號，之後 `task wait`：它只挑 `status:ready`、有派工留言、前置都已關閉、範圍不和進行中的單重疊的單，`severity:blocker`、`status:rework` 優先。
-2. 每張單用 `task start <N>`（退回單用 `task resume <N>`）標 `status:in-progress`、留「🔁 接手」並建自己的工作資料夾，不在主資料夾切分支；每張單派一個新的實作子代理。可同時接最多 `workerLimits.maxTickets` 張；兩張單改到同一個檔案時，後交件的先合併 `main` 再跑必跑檢查。
+1. 協調者開場跑 `task worker-name` 領代號，之後 `task wait`：它會挑 `status:ready`（有派工留言、前置都已關閉、範圍不和進行中的單重疊）、可接手的 `status:in-progress`（本機紀錄持有者心跳超過 `workerLimits.releaseAfterMinutes` 分鐘或已退休）與 `status:rework` 的單，排序為 `severity:blocker` → 可接手 → `status:rework` → `status:ready`。
+2. 接到單後依 `NEXT_KIND` 處理：`start` 跑 `task start <N>`（標 `status:in-progress`、留「🔁 接手」並建工作資料夾）；`resume` 或 `takeover` 跑 `task resume <N>`（退回單改為 `status:in-progress`，`NEXT_KIND=takeover` 時維持 `status:in-progress` 不換標籤並留「🔁 接手（交接自 `<X>`）」；本機已有工作資料夾就沿用，否則從遠端任務分支或 `origin/main` 重建），不在主資料夾切分支。每張單派一個新的實作子代理；`NEXT_KIND=takeover` 時派子代理在沿用或重建的工作資料夾接著做，並先看任務分支上已有的提交與單上留言。可同時接最多 `workerLimits.maxTickets` 張；兩張單改到同一個檔案時，後交件的先合併 `main` 再跑必跑檢查。
 3. 沒有單就繼續 `task wait`（每次保證在 5 分鐘內結束），**不因閒置收工**；只有工具回報「別的對話手上有單、最近也有回來找單、這個對話是多出來的」才收工，收工時留一句話。派出實作子代理後不要等它做完，立刻回到下一輪找單。
 4. 協調者做滿 `workerLimits.rotateAfterTickets` 張或連續 `workerLimits.rotateAfterHours` 小時，且有別的活著的協調者可以接班時，才在兩張單之間退休，留交接留言後結束；只剩自己時不退休，繼續接單，等新的協調者上線再退休；實作子代理單張超過 `workerLimits.maxBusinessLines` 行就停下建議拆單。
 5. **階段心跳與定時回報**：協調者定時送心跳（`task heartbeat --worker <代號>`）；派實作子代理時要給它子代理代號（例如 `A4-1`），並在指令寫明：
@@ -114,9 +115,9 @@ Claude 負責對話：<主題>（<對話連結>）
 
 開常駐對話時可附上以下指示，讓協調者與子代理依上述規則運作：
 
-> 切回最新 `main` 並跑 `node tools/task.mjs worker-name` 領取協調者代號 `A<n>`，之後反覆跑 `node tools/task.mjs wait --next --worker A<n> --timeout-sec 300` 找單（先為已關閉的單跑 `finish`）。
-> 接到單後 `start`／`resume` 建工作資料夾，每張單派一個實作子代理（代號如 `A<n>-1`），派完立刻回頭找下一張；交件 `submit` 後直接叫驗收員子代理跑 `accept <N> --as A<n>-V`。
-> 派實作子代理時務必告訴它：① 開始跑必跑檢查時執行 `node tools/task.mjs heartbeat --worker A<n> --ticket <N> --phase checking --agent <子代理代號>`；② 在單上提問後用 `node tools/task.mjs wait <N> --worker A<n>` 等回覆；③ 每 10 分鐘至少執行一次 `task heartbeat` 回報目前階段並把子代理代號寫進 `--agent`。
+> 切回最新 `main` 並跑 `node tools/task.ts worker-name` 領取協調者代號 `A<n>`，之後反覆跑 `node tools/task.ts wait --next --worker A<n> --timeout-sec 300` 找單（先為已關閉的單跑 `finish`）。
+> 接到單後依 `NEXT_KIND` 跑 `start`／`resume`（`NEXT_KIND=takeover` 一樣跑 `resume <N>`）建或沿用工作資料夾，每張單派一個實作子代理（代號如 `A<n>-1`；`NEXT_KIND=takeover` 時要它在工作資料夾接著做，並先看任務分支上已有的提交與單上留言），派完立刻回頭找下一張；交件 `submit` 後直接叫驗收員子代理跑 `accept <N> --as A<n>-V`。驗收 PASS 且單有 `merge:auto` 時，由協調者執行 `node tools/task.ts merge <N> --worker A<n>`（若工具拒絕就照常等規劃者處理）。
+> 派實作子代理時務必告訴它：① 開始跑必跑檢查時執行 `node tools/task.ts heartbeat --worker A<n> --ticket <N> --phase checking --agent <子代理代號>`；② 在單上提問後用 `node tools/task.ts wait <N> --worker A<n>` 等回覆；③ 每 10 分鐘至少執行一次 `task heartbeat` 回報目前階段並把子代理代號寫進 `--agent`。
 
 ## 7. 事件區塊
 
@@ -157,7 +158,7 @@ Claude 驗收發現的問題若能通則化，開 `type:immunity` 單提出「�
 同一件事記在兩份文件，或文件裡引用了別的檔案時，單靠人記很容易一改另一邊就失真。專案在 `project.config.json` 的 `docRules` 設定要掃描的文件路徑與登記關係：
 
 - 新增會被登記的文件類型（例如新的規格、ADR 或對外介面清單）時，要同時在 `project.config.json` 的 `docRules.registries` 宣告它必須登記在哪幾份文件。
-- `task docs-check`（加上 `--since <commit>` 還會檢查是否有文件指向已被刪除的檔案）與 `task accept` 會共用同一套檢查；規劃者直接提交到 `main` 前要跑專案的必跑檢查（設定檔 `acceptCommands` 列的指令）；專案沒有必跑檢查腳本時，至少跑 `node tools/task.mjs docs-check`，確保 `main` 上的文件連結與登記關係一直是乾淨的。
+- `task docs-check`（加上 `--since <commit>` 還會檢查是否有文件指向已被刪除的檔案）與 `task accept` 會共用同一套檢查；規劃者直接提交到 `main` 前要跑專案的必跑檢查（設定檔 `acceptCommands` 列的指令）；專案沒有必跑檢查腳本時，至少跑 `node tools/task.ts docs-check`，確保 `main` 上的文件連結與登記關係一直是乾淨的。
 
 ## 14. 跨專案需求單
 
@@ -166,3 +167,14 @@ Claude 驗收發現的問題若能通則化，開 `type:immunity` 單提出「�
 - 部門照自己倉庫的規範接單。成品放到需求方約定的位置（例如需求方的 `media` 分支，路徑用需求方單號），在部門單留言 `📦 交件`，並在需求方原單留一則交件留言；跨倉庫留言的身分寫成 `<身分>（<部門倉庫名>）`（例如 `🎨 G1（<部門倉庫名>）`）。
 - 需求方 Claude 用 `task wait --dept <代碼> <部門單號>` 等交件或提問。驗收權在需求方：視覺類一定要使用者本人確認。結果用 `task request-result` 回寫（通過就關部門單；退回改 `status:rework`）。部門不得自己關需求單。
 - 通過後由需求方把交付物搬進自己的倉庫（實作單），部門倉庫只留該職務的共用資產、技能、提示詞與流程。
+
+## 15. 執行環境
+
+本套件的 `tools/task.ts` 需要 Node `22.18` 以上（直接執行 `.ts`，各平台與終端機用同一行 `node tools/task.ts …`；專案根目錄的 `.nvmrc` 記著這個版本）。
+
+1. **開局與新同事加入時**：先在任何終端機（Mac、Linux、Windows cmd／PowerShell）跑 `node -v`，確認版本達到 Node `22.18` 以上。
+2. **沒有 Node 或版本太舊**：
+   - Mac：`brew install node`（或 nvm／fnm，進專案資料夾跑 `nvm use`／`fnm use`）。
+   - Windows：`winget install OpenJS.NodeJS`（或官方安裝檔）。
+   - Linux：發行版套件或 nvm／fnm。
+3. **常見問題**：看到 `Unknown file extension ".ts"` 就是 Node 太舊；`node tools/task.ts kit-check` 在版本太舊時列 `NODE-TOO-OLD` 並以 3 結束。

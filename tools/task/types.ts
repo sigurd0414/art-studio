@@ -25,6 +25,7 @@ export interface WorkerLimitsConfig {
   readonly rotateAfterHours?: number;
   readonly heartbeatAliveMinutes?: number;
   readonly pollFreshMinutes?: number;
+  readonly releaseAfterMinutes?: number;
 }
 
 export interface AcceptCommandConfig {
@@ -103,6 +104,7 @@ export interface ProjectConfig {
   readonly gatedPaths?: readonly string[];
   readonly acceptancePaths?: readonly string[];
   readonly protectedPaths?: readonly string[];
+  readonly autoMergeDenyPaths?: readonly string[];
   readonly sharedGenerated?: readonly string[];
   readonly evidencePaths?: readonly string[];
   readonly threeQuestionsPaths?: readonly string[];
@@ -541,7 +543,29 @@ export interface WorkerLimits {
   rotateAfterHours: number;
   heartbeatAliveMinutes: number;
   pollFreshMinutes: number;
+  releaseAfterMinutes: number;
 }
+
+export type TakeoverEligibilityFailureCode =
+  | 'not-found'
+  | 'closed'
+  | 'not-in-progress'
+  | 'unclaimed'
+  | 'self-claimed'
+  | 'worker-active';
+
+export type TakeoverEligibilityResult =
+  | {
+      ok: true;
+      prevWorker: string;
+      prevRole: WorkerRole;
+      prevHeartbeatAt: string;
+    }
+  | {
+      ok: false;
+      reasonCode: TakeoverEligibilityFailureCode;
+      reason: string;
+    };
 
 export interface WorkerLease {
   worker: string;
@@ -803,6 +827,7 @@ export type ParsedCliCommand =
 
 export interface KitManifest {
   kitVersion: string;
+  nodeMin?: string;
   project?: unknown;
   traits?: unknown;
   files: Record<string, unknown>;

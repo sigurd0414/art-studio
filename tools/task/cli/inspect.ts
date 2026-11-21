@@ -168,7 +168,7 @@ export function cmdStatus(ctx: TaskContext): number {
 
 export function cmdMine(ctx: TaskContext, { sessionArg }: Pick<MineCommandArgs, 'sessionArg'>): number {
   const sessionId = normalizeSessionId(sessionArg);
-  if (!sessionId) usageError('用法：task.mjs mine <對話連結或代號>');
+  if (!sessionId) usageError('用法：task.ts mine <對話連結或代號>');
 
   const owned = fetchAllIssues(ctx)
     .filter((it) => it.state === 'open' && ctx.lib.isIssueOwnedBySession(it, sessionId))

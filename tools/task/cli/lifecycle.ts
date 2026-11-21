@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getLabelNames } from '../lib.ts';
-import type { EvaluateStartResult, IssueCommandArgs, RuntimeRepo, TaskContext } from '../types.ts';
+import type { EvaluateStartResult, IssueCommandArgs, RuntimeRepo, TaskContext, WorkerRole } from '../types.ts';
 import { parseValidatedScope, verifyIssueScopeAndLines } from './inspect.ts';
 import { runSubmitPrecheck } from './precheck.ts';
 import {
@@ -24,8 +24,15 @@ import {
   swapIssueLabels,
   usageError,
 } from './runtime.ts';
-import { recordWorkerClaim, recordWorkerSubmit, releaseTicketFromWorkers } from './workers.ts';
 import {
+  evaluateTicketTakeover,
+  loadWorkerLimits,
+  recordWorkerClaim,
+  recordWorkerSubmit,
+  releaseTicketFromWorkers,
+} from './workers.ts';
+import {
+  checkLocalUnpushedBranch,
   claimLabelsAndBuildWorktrees,
   formatTaskBranch,
   getAffectedRepoKeys,
@@ -127,10 +134,154 @@ export async function cmdStart(
   }
 }
 
+type ResumeMode =
+  | { kind: 'rework' }
+  | { kind: 'takeover'; prevWorker: string; prevRole: WorkerRole; prevHeartbeatAt: string };
+
+function reuseExistingTaskDir(
+  ctx: TaskContext,
+  {
+    issueNum,
+    worker,
+    taskDir,
+    branchName,
+    affectedRepos,
+    isRework,
+  }: {
+    issueNum: number;
+    worker: string;
+    taskDir: string;
+    branchName: string;
+    affectedRepos: ReadonlySet<string>;
+    isRework: boolean;
+  },
+): string[] {
+  if (isRework) {
+    swapIssueLabels(ctx, issueNum, 'status:in-progress', 'status:rework');
+  }
+  const summaryLines = [`沿用既有任務資料夾：\`${taskDir}\``];
+  try {
+    for (const repo of ctx.repos) {
+      if (!affectedRepos.has(repo.key)) continue;
+      const wtPath = path.join(taskDir, repo.name);
+      if (!fs.existsSync(wtPath)) continue;
+      const fetchRes = runGit(wtPath, ['fetch', 'origin']);
+      if (!fetchRes.ok) {
+        fail(`拒絕接手：${repo.name} 執行 git fetch 失敗：${fetchRes.stderr || fetchRes.stdout}`);
+      }
+      const hasRemote = runGit(wtPath, ['rev-parse', '--verify', '-q', `refs/remotes/origin/${branchName}`]).ok;
+      if (hasRemote) {
+        const ahead = runGit(wtPath, ['rev-list', '--count', `origin/${branchName}..HEAD`]);
+        const countText = ahead.ok ? ahead.stdout.trim() : '?';
+        summaryLines.push(`- \`${repo.name}\`（\`${repo.key}\`）：沿用 \`${branchName}\`（本機比遠端多 ${countText} 個提交）`);
+      } else {
+        summaryLines.push(`- \`${repo.name}\`（\`${repo.key}\`）：沿用 \`${branchName}\`（尚未推送到遠端）`);
+      }
+    }
+    return summaryLines;
+  } catch (err: unknown) {
+    if (isRework) {
+      try { removeIssueLabel(ctx, issueNum, 'status:in-progress'); } catch {}
+      try { addIssueLabel(ctx, issueNum, 'status:rework'); } catch {}
+      try {
+        const reason = err instanceof Error ? err.message : String(err);
+        postIssueComment(ctx, issueNum, `🛠️ ${worker}\n接手重修失敗，已還原標籤為 \`status:rework\`：\n\n${reason}`);
+      } catch {}
+    }
+    throw err;
+  }
+}
+
+/**
+ * 交接接手且本機無任務資料夾時，依「遠端任務分支優先、無則 origin/main」重建 worktree，全程不改動 GitHub 標籤。
+ * @why `claimLabelsAndBuildWorktrees` 會交換狀態標籤；接手進行中的單須維持 `status:in-progress`，故僅於此執行無標籤改動的重建與失敗清理。
+ */
+function buildTakeoverWorktrees(
+  ctx: TaskContext,
+  {
+    taskDir,
+    branchName,
+    affectedRepos,
+  }: { taskDir: string; branchName: string; affectedRepos: ReadonlySet<string> },
+): string[] {
+  let createdTaskDir = false;
+  const createdWorktrees: Array<{ mainRepoPath: string; wtPath: string }> = [];
+  const createdBranches: Array<{ mainRepoPath: string; branch: string }> = [];
+  const branchSummaryLines: string[] = [];
+
+  try {
+    for (const repo of ctx.repos) {
+      const fetchRes = runGit(repo.mainRepoPath, ['fetch', 'origin']);
+      if (!fetchRes.ok) {
+        fail(`拒絕接手：${repo.name} 執行 git fetch 失敗：${fetchRes.stderr || fetchRes.stdout}`);
+      }
+    }
+
+    const startPoints = new Map<string, string>();
+    const preExistingLocalBranches = new Set<string>();
+    for (const repo of ctx.repos) {
+      if (!affectedRepos.has(repo.key)) continue;
+      const hasRemoteBranch = runGit(repo.mainRepoPath, [
+        'rev-parse',
+        '--verify',
+        '-q',
+        `refs/remotes/origin/${branchName}`,
+      ]).ok;
+      const startPoint = hasRemoteBranch ? `origin/${branchName}` : resolveBaseRef(repo.mainRepoPath);
+      startPoints.set(repo.key, startPoint);
+      if (checkLocalUnpushedBranch(repo.mainRepoPath, repo.name, branchName, startPoint, '接手')) {
+        preExistingLocalBranches.add(repo.key);
+      }
+    }
+
+    fs.mkdirSync(taskDir);
+    createdTaskDir = true;
+
+    for (const repo of ctx.repos) {
+      const wtPath = path.join(taskDir, repo.name);
+      runGit(repo.mainRepoPath, ['worktree', 'prune']);
+      if (affectedRepos.has(repo.key)) {
+        const startPoint = startPoints.get(repo.key) || resolveBaseRef(repo.mainRepoPath);
+        const addRes = runGit(repo.mainRepoPath, ['worktree', 'add', '-B', branchName, wtPath, startPoint]);
+        if (!addRes.ok) {
+          fail(`建立 ${repo.name} worktree 失敗：${addRes.stderr || addRes.stdout}`);
+        }
+        createdWorktrees.push({ mainRepoPath: repo.mainRepoPath, wtPath });
+        if (!preExistingLocalBranches.has(repo.key)) {
+          createdBranches.push({ mainRepoPath: repo.mainRepoPath, branch: branchName });
+        }
+        branchSummaryLines.push(`- \`${repo.name}\`（\`${repo.key}\`）：\`${branchName}\`（起點：\`${startPoint}\`）`);
+      } else {
+        const baseRef = resolveBaseRef(repo.mainRepoPath);
+        const addRes = runGit(repo.mainRepoPath, ['worktree', 'add', '--detach', wtPath, baseRef]);
+        if (!addRes.ok) {
+          fail(`建立 ${repo.name} detached worktree 失敗：${addRes.stderr || addRes.stdout}`);
+        }
+        createdWorktrees.push({ mainRepoPath: repo.mainRepoPath, wtPath });
+        branchSummaryLines.push(`- \`${repo.name}\`（\`${repo.key}\`）：\`${baseRef}\` (detached)`);
+      }
+    }
+    return branchSummaryLines;
+  } catch (err: unknown) {
+    for (const { mainRepoPath, wtPath } of createdWorktrees) {
+      runGit(mainRepoPath, ['worktree', 'remove', '--force', wtPath]);
+      runGit(mainRepoPath, ['worktree', 'prune']);
+    }
+    for (const { mainRepoPath, branch } of createdBranches) {
+      runGit(mainRepoPath, ['branch', '-D', branch]);
+    }
+    if (createdTaskDir) {
+      fs.rmSync(taskDir, { recursive: true, force: true });
+    }
+    throw err;
+  }
+}
+
 export async function cmdResume(
   ctx: TaskContext,
   { issueNum, worker }: Pick<IssueCommandArgs, 'issueNum' | 'worker'>,
 ): Promise<number> {
+  const limits = loadWorkerLimits(ctx.config);
   const taskDir = getTaskDir(ctx, issueNum);
   const branchName = formatTaskBranch(ctx, issueNum);
   const lockDir = path.join(ctx.worktreeRoot, '.task-start.lock');
@@ -138,62 +289,75 @@ export async function cmdResume(
 
   try {
     const target = fetchSingleIssue(ctx, issueNum);
-    // 手動重修不必受限於新對話寬限期，傳入已過寬限時間的基準留言供狀態與開關檢查
-    const check = ctx.lib.evaluateIssueCanResume(target, {
-      comments: [{ body: '🤖 Claude', created_at: '1970-01-01T00:00:00Z' }],
-    });
-    if (!check.ok) fail(`拒絕接手：${check.reason}`);
+    if (!target) fail(`拒絕接手：找不到 issue #${issueNum}`);
+    if (target.state !== 'open') fail(`拒絕接手：issue #${issueNum} 已關閉`);
 
-    const scope = parseValidatedScope(ctx.lib, issueNum, target?.body, '拒絕接手');
+    const labels = getLabelNames(target);
+    let mode: ResumeMode;
+    if (labels.includes('status:rework')) {
+      // 手動重修不必受限於新對話寬限期，傳入已過寬限時間的基準留言供狀態與開關檢查
+      const check = ctx.lib.evaluateIssueCanResume(target, {
+        comments: [{ body: '🤖 Claude', created_at: '1970-01-01T00:00:00Z' }],
+      });
+      if (!check.ok) fail(`拒絕接手：${check.reason}`);
+      mode = { kind: 'rework' };
+    } else if (labels.includes('status:in-progress') && !labels.includes('status:fixed')) {
+      const takeover = evaluateTicketTakeover(ctx.worktreeRoot, target, worker, limits);
+      if (!takeover.ok) fail(`拒絕接手：${takeover.reason}`);
+      mode = {
+        kind: 'takeover',
+        prevWorker: takeover.prevWorker,
+        prevRole: takeover.prevRole,
+        prevHeartbeatAt: takeover.prevHeartbeatAt,
+      };
+    } else {
+      fail(`拒絕接手：issue #${issueNum} 沒有 status:rework 標籤，也不是可接手的進行中單`);
+    }
+
+    const scope = parseValidatedScope(ctx.lib, issueNum, target.body, '拒絕接手');
     const affectedRepos = getAffectedRepoKeys(scope);
     let summaryLines: string[];
 
     if (fs.existsSync(taskDir)) {
-      swapIssueLabels(ctx, issueNum, 'status:in-progress', 'status:rework');
-      summaryLines = [`沿用既有任務資料夾：\`${taskDir}\``];
-      try {
-        for (const repo of ctx.repos) {
-          if (!affectedRepos.has(repo.key)) continue;
-          const wtPath = path.join(taskDir, repo.name);
-          if (!fs.existsSync(wtPath)) continue;
-          const fetchRes = runGit(wtPath, ['fetch', 'origin']);
-          if (!fetchRes.ok) {
-            fail(`拒絕接手：${repo.name} 執行 git fetch 失敗：${fetchRes.stderr || fetchRes.stdout}`);
-          }
-          const hasRemote = runGit(wtPath, ['rev-parse', '--verify', '-q', `refs/remotes/origin/${branchName}`]).ok;
-          if (hasRemote) {
-            const ahead = runGit(wtPath, ['rev-list', '--count', `origin/${branchName}..HEAD`]);
-            const countText = ahead.ok ? ahead.stdout.trim() : '?';
-            summaryLines.push(`- \`${repo.name}\`（\`${repo.key}\`）：沿用 \`${branchName}\`（本機比遠端多 ${countText} 個提交）`);
-          } else {
-            summaryLines.push(`- \`${repo.name}\`（\`${repo.key}\`）：沿用 \`${branchName}\`（尚未推送到遠端）`);
-          }
-        }
-      } catch (err: unknown) {
-        try { removeIssueLabel(ctx, issueNum, 'status:in-progress'); } catch {}
-        try { addIssueLabel(ctx, issueNum, 'status:rework'); } catch {}
-        try {
-          const reason = err instanceof Error ? err.message : String(err);
-          postIssueComment(ctx, issueNum, `🛠️ ${worker}\n接手重修失敗，已還原標籤為 \`status:rework\`：\n\n${reason}`);
-        } catch {}
-        throw err;
-      }
-    } else {
-      preflightLocalWorktreeBuild(ctx, { taskDir, branchName, affectedRepos, actionLabel: '接手' });
-      const branchSummaryLines = claimLabelsAndBuildWorktrees(ctx, {
+      summaryLines = reuseExistingTaskDir(ctx, {
         issueNum,
         worker,
         taskDir,
         branchName,
         affectedRepos,
-        addLabel: 'status:in-progress',
-        removeLabel: 'status:rework',
-        actionLabel: '接手',
+        isRework: mode.kind === 'rework',
       });
+    } else {
+      preflightLocalWorktreeBuild(ctx, { taskDir, branchName, affectedRepos, actionLabel: '接手' });
+      const branchSummaryLines =
+        mode.kind === 'rework'
+          ? claimLabelsAndBuildWorktrees(ctx, {
+              issueNum,
+              worker,
+              taskDir,
+              branchName,
+              affectedRepos,
+              addLabel: 'status:in-progress',
+              removeLabel: 'status:rework',
+              actionLabel: '接手',
+            })
+          : buildTakeoverWorktrees(ctx, { taskDir, branchName, affectedRepos });
       summaryLines = [`原本的任務資料夾不在，已重建：\`${taskDir}\``, ...branchSummaryLines];
     }
 
-    const commentBody = [`🛠️ ${worker}`, '🔁 接手重修', '', ...summaryLines].join('\n');
+    const commentBody =
+      mode.kind === 'takeover'
+        ? [
+            `🛠️ ${worker}`,
+            `🔁 接手（交接自 ${mode.prevWorker}）`,
+            '',
+            `前一位協調者：${mode.prevWorker}（${
+              mode.prevRole === 'retired' ? '已退休，' : ''
+            }最後心跳 ${mode.prevHeartbeatAt}）`,
+            '',
+            ...summaryLines,
+          ].join('\n')
+        : [`🛠️ ${worker}`, '🔁 接手重修', '', ...summaryLines].join('\n');
     postIssueComment(ctx, issueNum, commentBody);
     await recordWorkerClaim(ctx, { worker, issueNum });
 

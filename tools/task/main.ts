@@ -44,7 +44,7 @@ import type {
 } from './types.ts';
 
 const USAGE = [
-  '用法：node task.mjs <start|resume|submit|finish|scope-check|status|mine|worker-name|heartbeat|wait|accept|merge|propose|request|request-result|kit-check|kit-outdated|agent-check|docs-check|gate-check> [選項]',
+  '用法：node task.ts <start|resume|submit|finish|scope-check|status|mine|worker-name|heartbeat|wait|accept|merge|propose|request|request-result|kit-check|kit-outdated|agent-check|docs-check|gate-check> [選項]',
   '  wait --next --worker <代號> [--interval-sec 60] [--timeout-sec 300]',
   '  wait <N> [--since <ISO時間>] [--interval-sec 60] [--timeout-sec 7200] [--worker <代號>]',
   '  wait --dept <代碼> <M> [--since <ISO時間>] [--interval-sec 60] [--timeout-sec 7200]',
@@ -52,13 +52,13 @@ const USAGE = [
   '  request-result --dept <代碼> <M> --result pass|fail --note <一句話以上>',
   '  heartbeat --worker <代號> [--ticket <N> --phase <階段> [--agent <稱呼>] [--note <一句話>]]',
   '  accept <N> --as <驗收員代號> [--no-post]',
-  '  merge <N> [--override <理由>] [--dry-run]',
+  '  merge <N> [--worker <代號>] [--override <理由>] [--dry-run]',
   '  propose --title <標題> --target <規則或工具> --what <發生什麼> --suggest <建議> [--area rule|tool|template|other] [--ref <#N 或網址>]... [--role planner|implementer] [--worker <代號>] [--dry-run]',
   '  docs-check [--since <commit>]',
   '  gate-check [--staged | --range <基準>..<目標>] [--repo <name>] [--commit-msg <檔案>]',
 ].join('\n');
 
-const WORKER_ALLOWED_CMDS = new Set(['start', 'resume', 'submit', 'heartbeat', 'wait', 'propose']);
+const WORKER_ALLOWED_CMDS = new Set(['start', 'resume', 'submit', 'heartbeat', 'wait', 'merge', 'propose']);
 const WORKER_REQUIRED_CMDS = new Set(['start', 'resume', 'submit', 'heartbeat']);
 const PLANNER_ONLY_CMDS = new Set(['request', 'request-result']);
 const ISSUE_CMDS = new Set(['start', 'resume', 'submit', 'finish', 'scope-check', 'accept', 'merge']);
@@ -631,11 +631,14 @@ function parseCliArgs(argv: readonly string[]): ParsedCliCommand {
       return { cmd, issueNum, sessionArg: '', worker: '', dryRun: false, note: '', as: asFlag, noPost };
     }
     if (cmd === 'merge') {
+      if (worker && overrideReason !== null) {
+        usageError(`用法錯誤：協調者自動合併不支援 --override\n${USAGE}`);
+      }
       return {
         cmd,
         issueNum,
         sessionArg: '',
-        worker: '',
+        worker,
         dryRun,
         note: '',
         override: overrideReason !== null ? String(overrideReason).trim() : null,

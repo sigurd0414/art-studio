@@ -12,6 +12,24 @@ import { computeMarkdownFencedLines } from './docs.ts';
 import { fail } from './runtime.ts';
 
 const AGENTS_KIT_VERSION_RE = /(由初始化套件 v)(\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.+-]+)?)( 產生)/;
+const NODE_MIN_RE = /^(\d+)\.(\d+)$/;
+const NODE_RUNTIME_RE = /^(\d+)\.(\d+)/;
+const OLD_TASK_COMMAND = 'tools/task.mjs';
+const NEW_TASK_COMMAND = 'tools/task.ts';
+const OPERATIONAL_DOC_FIXED_PATHS = [
+  'AGENTS.md',
+  'CLAUDE.md',
+  'GEMINI.md',
+  'project.config.json',
+  'docs/collaboration-protocol.md',
+] as const;
+
+export interface OperationalCommandReplacement {
+  relPath: string;
+  stagedPath: string;
+  count: number;
+  nextText: string;
+}
 
 interface KitCheckItem {
   relPath: string;
@@ -39,6 +57,7 @@ function isKitManifest(value: unknown): value is KitManifest {
     isRecord(value) &&
     typeof value.kitVersion === 'string' &&
     value.kitVersion.trim().length > 0 &&
+    (value.nodeMin === undefined || typeof value.nodeMin === 'string') &&
     isRecord(value.files) &&
     (value.kept === undefined ||
       (Array.isArray(value.kept) && value.kept.every((item) => typeof item === 'string' && item.trim().length > 0)))
@@ -284,7 +303,141 @@ function collectVersionMismatches(configDir: string, manifestVersion: string): K
   return mismatches;
 }
 
-/** 執行 `task kit-check`：依 `.kit/manifest.json` 檢查套件產生檔案的遺失、修改、過時設定鍵與 AGENTS.md 版本一致，並接著執行 `agent-check`。 */
+/** 解析 `主.次` Node 版本字串，格式不符時回傳 null。 */
+export function parseMajorMinor(raw: unknown): readonly [number, number] | null {
+  if (typeof raw !== 'string') return null;
+  const match = NODE_MIN_RE.exec(raw.trim());
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2])];
+}
+
+function isNodeVersionBelow(runtimeVersion: string, requiredMin: string): boolean {
+  const minParts = parseMajorMinor(requiredMin);
+  if (!minParts) {
+    fail(`.kit/manifest.json 的 nodeMin 格式錯誤：${requiredMin}`);
+  }
+  const runMatch = NODE_RUNTIME_RE.exec(runtimeVersion);
+  if (!runMatch) {
+    fail(`無法解析目前 Node 版本：${runtimeVersion}`);
+  }
+  const runMajor = Number(runMatch[1]);
+  const runMinor = Number(runMatch[2]);
+  return runMajor < minParts[0] || (runMajor === minParts[0] && runMinor < minParts[1]);
+}
+
+function collectNodeTooOldLine(manifest: KitManifest): string | null {
+  if (manifest.nodeMin === undefined) return null;
+  const requiredMin = manifest.nodeMin.trim();
+  if (!isNodeVersionBelow(process.versions.node, requiredMin)) {
+    return null;
+  }
+  return `NODE-TOO-OLD v${process.versions.node}（需要 ${requiredMin} 以上，照協議「執行環境」一節更新）`;
+}
+
+function isExistingRegularFile(filePath: string): boolean {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function readTextFileIfNotBinary(filePath: string): string | null {
+  const buf = fs.readFileSync(filePath);
+  if (buf.includes(0)) return null;
+  return buf.toString('utf8');
+}
+
+function collectRegularFilesInSubdir(
+  baseDir: string,
+  subDirRel: string,
+  predicate: (relPath: string) => boolean,
+  out: Set<string>,
+): void {
+  const startDir = path.join(baseDir, subDirRel);
+  try {
+    if (!fs.statSync(startDir).isDirectory()) return;
+  } catch {
+    return;
+  }
+
+  const walk = (dir: string, relPrefix: string): void => {
+    for (const name of fs.readdirSync(dir).sort(compareCodeUnit)) {
+      const full = path.join(dir, name);
+      const rel = `${relPrefix}/${name}`;
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(full);
+      } catch {
+        continue;
+      }
+      if (stat.isDirectory()) {
+        walk(full, rel);
+      } else if (stat.isFile() && predicate(rel)) {
+        out.add(rel);
+      }
+    }
+  };
+  walk(startDir, subDirRel);
+}
+
+/**
+ * 列出所有操作說明檔的相對路徑（依字元碼排序，存在的才算）。
+ * @why 升級換指令與 kit-check 共用同一份清單，確保檢查與替換範圍一致且排除決策紀錄與 ADR 等歷史文件。
+ */
+function listOperationalDocRelPaths(roots: readonly string[]): string[] {
+  const found = new Set<string>();
+  for (const root of roots) {
+    for (const rel of OPERATIONAL_DOC_FIXED_PATHS) {
+      if (isExistingRegularFile(path.join(root, ...rel.split('/')))) {
+        found.add(rel);
+      }
+    }
+    collectRegularFilesInSubdir(root, '.agents', () => true, found);
+    collectRegularFilesInSubdir(root, 'tools', (rel) => rel.endsWith('.sh'), found);
+  }
+  return [...found].sort(compareCodeUnit);
+}
+
+/** 找出操作說明檔中仍含舊入口指令的項目與替換結果（暫存區已有新版時以暫存區內容為準）。 */
+export function findOperationalCommandReplacements(
+  stageDir: string | null,
+  targetDir: string,
+): OperationalCommandReplacement[] {
+  const roots = stageDir ? [stageDir, targetDir] : [targetDir];
+  const results: OperationalCommandReplacement[] = [];
+  for (const relPath of listOperationalDocRelPaths(roots)) {
+    const parts = relPath.split('/');
+    const stagedPath = stageDir ? path.join(stageDir, ...parts) : '';
+    const targetPath = path.join(targetDir, ...parts);
+    const sourcePath = stagedPath && isExistingRegularFile(stagedPath) ? stagedPath : targetPath;
+    if (!isExistingRegularFile(sourcePath)) continue;
+
+    const text = readTextFileIfNotBinary(sourcePath);
+    if (text === null) continue;
+    const segments = text.split(OLD_TASK_COMMAND);
+    const count = segments.length - 1;
+    if (count > 0) {
+      results.push({
+        relPath,
+        stagedPath,
+        count,
+        nextText: segments.join(NEW_TASK_COMMAND),
+      });
+    }
+  }
+  return results;
+}
+
+function collectOldCommandItems(configDir: string): KitCheckItem[] {
+  return findOperationalCommandReplacements(null, configDir).map((item) => ({
+    relPath: item.relPath,
+    line: `OLD-COMMAND ${item.relPath} ${item.count}（改成 ${NEW_TASK_COMMAND}，或跑 init --upgrade）`,
+    isDiff: true,
+  }));
+}
+
+/** 執行 `task kit-check`：依 `.kit/manifest.json` 檢查套件產生檔案的遺失、修改、Node 版本、舊入口指令與版本一致，並接著執行 `agent-check`。 */
 export function cmdKitCheck(cwd = process.cwd()): number {
   const configPath = findConfigPath(cwd);
   const configDir = path.dirname(configPath);
@@ -324,10 +477,18 @@ export function cmdKitCheck(cwd = process.cwd()): number {
   items.sort((a, b) => compareCodeUnit(a.relPath, b.relPath));
   const obsoleteConfigItems = collectObsoleteConfigItems(configPath);
   const versionMismatches = collectVersionMismatches(configDir, manifestVersion);
+  const nodeTooOldLine = collectNodeTooOldLine(manifest);
+  const oldCommandItems = collectOldCommandItems(configDir);
 
   console.log(`KIT_VERSION=${manifestVersion}`);
   let kitExit = 0;
-  if (items.length === 0 && obsoleteConfigItems.length === 0 && versionMismatches.length === 0) {
+  if (
+    items.length === 0 &&
+    obsoleteConfigItems.length === 0 &&
+    versionMismatches.length === 0 &&
+    nodeTooOldLine === null &&
+    oldCommandItems.length === 0
+  ) {
     console.log(`所有套件產生的檔案皆與基準一致（共 ${filePaths.length} 個檔案）。`);
   } else {
     for (const item of items) {
@@ -351,6 +512,14 @@ export function cmdKitCheck(cwd = process.cwd()): number {
     }
     if (versionMismatches.length > 0) {
       console.log('提醒：偵測到套件版本不一致，請跑 `init --upgrade` 或手動改成一致。');
+      kitExit = 3;
+    }
+    if (nodeTooOldLine !== null) {
+      console.log(nodeTooOldLine);
+      kitExit = 3;
+    }
+    for (const oldCmd of oldCommandItems) {
+      console.log(oldCmd.line);
       kitExit = 3;
     }
   }

@@ -20,7 +20,7 @@ import { findConfigPath } from './kitcheck.ts';
 import { fail, parseLockCommitSha, runGit, splitNullSeparated, usageError } from './runtime.ts';
 
 const GATE_USAGE =
-  '用法：node task.mjs gate-check [--staged | --range <基準>..<目標>] [--repo <name>] [--commit-msg <檔案>]';
+  '用法：node task.ts gate-check [--staged | --range <基準>..<目標>] [--repo <name>] [--commit-msg <檔案>]';
 const REPO_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export type GateChangeOn = 'add' | 'any';

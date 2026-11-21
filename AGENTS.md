@@ -1,6 +1,6 @@
 # art-studio 專案規範（`AGENTS.md`）
 
-本檔是規劃者（Claude）與實作者（Antigravity）共用的唯一規則檔，由初始化套件 v0.2.7 產生。`CLAUDE.md` 只寫 `@AGENTS.md`，`GEMINI.md` 只寫「請遵守 AGENTS.md」。要改通用規則請改套件；本專案專屬的規則寫在第 10 節。
+本檔是規劃者（Claude）與實作者（Antigravity）共用的唯一規則檔，由初始化套件 v0.2.11 產生。`CLAUDE.md` 只寫 `@AGENTS.md`，`GEMINI.md` 只寫「請遵守 AGENTS.md」。要改通用規則請改套件；本專案專屬的規則寫在第 10 節。
 
 ## 1. 熱區（開工前必讀）與冷區
 
@@ -59,7 +59,7 @@
 ## 7. 協作（必讀 `docs/collaboration-protocol.md`）
 
 - 留言第一行標身分：Claude 寫 `🤖 Claude`，實作寫 `🛠️ <代號>`，驗收員寫 `🧪 驗收員`；沒有標記的留言視為使用者本人。
-- 常駐接單、交件、驗收、合併一律用 `task` 工具；每張單在自己的工作資料夾做，不在主資料夾切分支。
+- 常駐接單、交件、驗收、合併一律用 `task` 工具（`node tools/task.ts …`，需 Node `22.18` 以上，見協議「執行環境」一節）；每張單在自己的工作資料夾做，不在主資料夾切分支。
 - 有問題在單上留言後用 `task wait <N> --worker <代號>` 等回覆（自動切為 `blocked`），不要停下來等人打字；實作子代理開始跑檢查時回報 `checking`，每 10 分鐘至少用 `task heartbeat --worker <代號> --ticket <N> --phase <階段> --agent <子代理代號>` 回報一次。
 
 ## 8. 提交前必跑

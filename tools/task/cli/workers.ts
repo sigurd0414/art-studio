@@ -5,10 +5,13 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { getLabelNames } from '../lib.ts';
 import type {
+  GitHubIssue,
   HeartbeatCommandArgs,
   LockOwnerMeta,
   ProjectConfig,
+  TakeoverEligibilityResult,
   TaskContext,
   TicketPhase,
   WorkerLease,
@@ -19,7 +22,7 @@ import type {
   WorkerTicketState,
 } from '../types.ts';
 import { isTicketPhase, sendWorkerHeartbeat } from './heartbeat.ts';
-import { acquireDirLock, fail, releaseDirLock } from './runtime.ts';
+import { acquireDirLock, fail, releaseDirLock, usageError } from './runtime.ts';
 
 export const DEFAULT_WORKER_LIMITS: Readonly<WorkerLimits> = Object.freeze({
   maxTickets: 3,
@@ -27,6 +30,7 @@ export const DEFAULT_WORKER_LIMITS: Readonly<WorkerLimits> = Object.freeze({
   rotateAfterHours: 8,
   heartbeatAliveMinutes: 15,
   pollFreshMinutes: 10,
+  releaseAfterMinutes: 30,
 });
 
 export type AcquireWorkerLeaseResult =
@@ -70,16 +74,37 @@ function parsePositiveLimit(val: unknown, fallback: number): number {
   return typeof val === 'number' && Number.isFinite(val) && val > 0 ? val : fallback;
 }
 
-/** 從專案設定讀取實作者輪替與並行上限，未設定欄位則採規格預設值。 */
+/** 從專案設定讀取實作者輪替與並行上限，未設定欄位則採規格預設值；`releaseAfterMinutes` 須為大於 `heartbeatAliveMinutes` 的正整數。 */
 export function loadWorkerLimits(config: Pick<ProjectConfig, 'workerLimits'> | null | undefined): WorkerLimits {
   const raw: WorkerLimitsConfig =
     config && typeof config.workerLimits === 'object' && config.workerLimits ? config.workerLimits : {};
+  const heartbeatAliveMinutes = parsePositiveLimit(
+    raw.heartbeatAliveMinutes,
+    DEFAULT_WORKER_LIMITS.heartbeatAliveMinutes,
+  );
+  let releaseAfterMinutes = DEFAULT_WORKER_LIMITS.releaseAfterMinutes;
+  if (raw.releaseAfterMinutes !== undefined) {
+    if (
+      typeof raw.releaseAfterMinutes !== 'number' ||
+      !Number.isSafeInteger(raw.releaseAfterMinutes) ||
+      raw.releaseAfterMinutes <= 0
+    ) {
+      usageError('設定檔錯誤：workerLimits.releaseAfterMinutes 必須是正整數');
+    }
+    releaseAfterMinutes = raw.releaseAfterMinutes;
+  }
+  if (releaseAfterMinutes <= heartbeatAliveMinutes) {
+    usageError(
+      `設定檔錯誤：workerLimits.releaseAfterMinutes（${releaseAfterMinutes}）必須大於 heartbeatAliveMinutes（${heartbeatAliveMinutes}）`,
+    );
+  }
   return {
     maxTickets: parsePositiveLimit(raw.maxTickets, DEFAULT_WORKER_LIMITS.maxTickets),
     rotateAfterTickets: parsePositiveLimit(raw.rotateAfterTickets, DEFAULT_WORKER_LIMITS.rotateAfterTickets),
     rotateAfterHours: parsePositiveLimit(raw.rotateAfterHours, DEFAULT_WORKER_LIMITS.rotateAfterHours),
-    heartbeatAliveMinutes: parsePositiveLimit(raw.heartbeatAliveMinutes, DEFAULT_WORKER_LIMITS.heartbeatAliveMinutes),
+    heartbeatAliveMinutes,
     pollFreshMinutes: parsePositiveLimit(raw.pollFreshMinutes, DEFAULT_WORKER_LIMITS.pollFreshMinutes),
+    releaseAfterMinutes,
   };
 }
 
@@ -305,6 +330,70 @@ export function isWorkerAlive(worker: WorkerRecord | null | undefined, nowMs: nu
   const hbMs = Date.parse(worker.heartbeatAt || '');
   if (!Number.isFinite(hbMs)) return false;
   return nowMs - hbMs <= limits.heartbeatAliveMinutes * 60 * 1000;
+}
+
+/**
+ * 依 S-040 第 3.2 節判定進行中的單是否可由 `currentWorker` 接手；只讀取本機 `.workers/` 紀錄。
+ * @why `wait --next` 與 `resume` 共用同一份判定邏輯，避免搶單與實際接手條件不一致或誤搶別台機器上的協調者。
+ */
+export function evaluateTicketTakeover(
+  worktreeRoot: string,
+  target: GitHubIssue | null | undefined,
+  currentWorker: string,
+  limits: WorkerLimits,
+  nowMs = Date.now(),
+): TakeoverEligibilityResult {
+  if (!target) {
+    return { ok: false, reasonCode: 'not-found', reason: '找不到 issue' };
+  }
+  if (target.state !== 'open') {
+    return { ok: false, reasonCode: 'closed', reason: `issue #${target.number} 已關閉` };
+  }
+  const labels = getLabelNames(target);
+  if (!labels.includes('status:in-progress') || labels.includes('status:rework') || labels.includes('status:fixed')) {
+    return { ok: false, reasonCode: 'not-in-progress', reason: `issue #${target.number} 不是可接手的進行中單` };
+  }
+
+  const { records } = listAllWorkerRecordsSafe(worktreeRoot);
+  const holders = records.filter((rec) => rec.claims.includes(target.number));
+  if (holders.length === 0) {
+    return {
+      ok: false,
+      reasonCode: 'unclaimed',
+      reason: `本機沒有任何實作者紀錄持有 #${target.number}`,
+    };
+  }
+
+  const selfHolder = holders.find((rec) => rec.name === currentWorker);
+  if (selfHolder) {
+    return {
+      ok: false,
+      reasonCode: 'self-claimed',
+      reason: `#${target.number} 目前正由自己（${currentWorker}，最後心跳 ${selfHolder.heartbeatAt}）持有`,
+    };
+  }
+
+  const releaseAfterMs = limits.releaseAfterMinutes * 60 * 1000;
+  for (const holder of holders) {
+    if (holder.role === 'retired') continue;
+    const hbMs = Date.parse(holder.heartbeatAt || '');
+    if (Number.isFinite(hbMs) && nowMs - hbMs <= releaseAfterMs) {
+      const elapsedMin = Math.max(0, Math.floor((nowMs - hbMs) / 60000));
+      return {
+        ok: false,
+        reasonCode: 'worker-active',
+        reason: `${holder.name} 心跳 ${elapsedMin} 分鐘前還在（最後心跳 ${holder.heartbeatAt}），未超過 ${limits.releaseAfterMinutes} 分鐘`,
+      };
+    }
+  }
+
+  const prev = holders[0];
+  return {
+    ok: true,
+    prevWorker: prev.name,
+    prevRole: prev.role,
+    prevHeartbeatAt: prev.heartbeatAt,
+  };
 }
 
 /** 檢查實作者最近是否仍有回來找單（只看 lastPollAt；沒有該欄代表從未透過 wait --next 找單，不算輪詢中）。 */
