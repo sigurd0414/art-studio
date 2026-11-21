@@ -15,7 +15,7 @@
 
 **單**：art-studio#3（實作：美編 G1）
 
-**要先完成**：art-studio#1、#2 的部門檔已由總規劃合併進 `main`（ADR-001 第 2 節第 6 點）。總規劃合併後才派工。
+**要先完成**：art-studio#1、#2 的部門檔已由總規劃合併進 `main`（ADR-001 第 2 節第 6 點）。✅ 2026-11-21 16:3x 已合併（95bcdc5、b93f5c5）。
 
 **要做的事**
 
@@ -30,7 +30,16 @@
    - 檔尾「版本紀錄」。
 4. 兩份批次紀錄開頭各補一列「範本：`prompts/agent-office.md` 版本 1.x」（只加這一列，其餘內容不改，屬 ADR-001 第 2 節第 4 點允許的修正）。
 5. `skills/gpt-original-cutout.md`、`styles/agent-office.md` 開頭改成 ADR-001 第 2 節第 3 點的表格格式，檔尾加「版本紀錄」；內容不改，版本號維持 1.0。
-6. 跑 `node tools/task.mjs docs-check`，必須通過（總規劃會在派工前把三個資料夾的登記規則加進 `project.config.json`）。
+6. 在 `project.config.json` 的 `docRules.registries` 陣列尾端加上下面四筆（本單明確授權只改這一處，其他設定不動）。工具的檔名樣式不支援排除，所以用 `when` 只挑開頭有 `| 版本 |` 表格列（技能、範本、風格）或有「需求來源」（批次紀錄）的檔，`README.md` 開頭不要放 `| 版本 |` 這一列：
+
+```json
+{ "id": "skill", "files": "skills/*.md", "when": "^\\| 版本 \\|", "mustAppearIn": ["skills/README.md"] },
+{ "id": "prompt-template", "files": "prompts/*.md", "when": "^\\| 版本 \\|", "mustAppearIn": ["prompts/README.md"] },
+{ "id": "prompt-batch", "files": "prompts/batches/*.md", "when": "需求來源", "mustAppearIn": ["prompts/README.md"] },
+{ "id": "style", "files": "styles/*.md", "when": "^\\| 版本 \\|", "mustAppearIn": ["styles/README.md"] }
+```
+
+7. 跑 `node tools/task.mjs docs-check`，必須通過。
 
 **影響範圍**
 
@@ -45,6 +54,7 @@ prompts/batches/agent-office-99.md
 prompts/batches/agent-office-100.md
 styles/README.md
 styles/agent-office.md
+project.config.json
 ```
 
 **驗收條件**
@@ -53,11 +63,11 @@ styles/agent-office.md
 - [ ] `prompts/batches/agent-office-99.md`、`prompts/batches/agent-office-100.md` 存在，`git log --follow` 看得到是從舊檔名改過來的；舊檔名已不存在；除了檔內路徑與「範本」那一列外，內容跟改名前逐字相同。
 - [ ] `prompts/agent-office.md` 有版本 1.0 與 1.1，各自寫明出處與差異；1.0 的提示詞跟 art-studio#1 內文附錄逐字相同。
 - [ ] 每份技能、範本、風格檔開頭都有 `版本`、`最後確認`、`適用`、`不適用`，檔尾有「版本紀錄」。
-- [ ] `node tools/task.mjs docs-check` 通過。
+- [ ] `project.config.json` 只多了上面四筆登記規則；`node tools/task.mjs docs-check` 通過，輸出的 `DOC_RULES=` 含 `skill,prompt-template,prompt-batch,style`。
 - [ ] 沒有任何圖片檔進倉庫；沒有改到影響範圍以外的檔。
 
 **不做**
 
 - 不重寫或「改良」既有提示詞與流程內容（改進留給之後的範本新版本）。
 - 不把需求方的成品、審查圖或參考圖複製進本倉庫。
-- 不改 `docs/`、`specs/`、`project.config.json`、`AGENTS.md`。
+- 不改 `docs/`、`specs/`、`AGENTS.md`；`project.config.json` 只加第 6 點的四筆。
