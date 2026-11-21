@@ -1,5 +1,7 @@
 # agent-office 第四批：牆面與小物件
 
+範本：[prompts/agent-office.md](../agent-office.md) 版本 1.1。
+
 版本：1.1（北牆方向重修）；最後確認日期：2026-11-21。
 
 需求來源：[agent-office#100](https://github.com/sigurd0414/agent-office/issues/100)；部門單：[art-studio#2](https://github.com/sigurd0414/art-studio/issues/2)。
