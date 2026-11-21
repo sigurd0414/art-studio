@@ -28,5 +28,5 @@
 | :--- | :--- | :--- |
 | 3 | 套件升級到 0.2.9 | 等 agent-office 發布 0.2.9（低風險單自動合併，agent-office#108）；`node <agent-office>/templates/bin/init.mjs --upgrade --target <art-studio> --today <日期>`，`kit-check` 通過後提交 |
 | 4 | 美編上崗測試 | Codex 桌面版 vs `codex exec` 命令列版畫同一批樣本比品質（agent-office ADR-005 第 2 節第 8、12 點）；**等使用者決定要不要做** |
-| 5 | 部門單關閉後合併部門檔的工具支援 | 已用 `task propose` 回報套件上游；上游有做法後改寫 ADR-001 第 2 節第 6 點 |
+| 5 | 部門單關閉後合併部門檔的工具支援 | 要用 `task propose` 回報套件上游（草稿已備，等取得 agent-office 開單權限）；上游有做法後改寫 ADR-001 第 2 節第 6 點 |
 | 6 | 本倉庫的角色目錄 | 等套件做出角色目錄（agent-office ADR-005 第 4 節第 2 張單）後，在本倉庫設定登記 G1 |

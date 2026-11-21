@@ -11,6 +11,7 @@
   ],
   "sensitive": false,
   "public": false,
+  "kitUpstream": "sigurd0414/agent-office",
   "containerDirs": [
     "specs",
     "docs",
