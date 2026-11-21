@@ -43,7 +43,27 @@
     "generatedPaths": []
   },
   "docRules": {
-    "registries": []
+    "registries": [
+      {
+        "id": "adr",
+        "files": "docs/adr/ADR-*.md",
+        "when": "狀態.*已接受",
+        "mustAppearIn": [
+          "docs/decisions.md"
+        ],
+        "pending": {
+          "when": "狀態.*(提議中|草案)",
+          "maxDays": 14
+        }
+      },
+      {
+        "id": "spec",
+        "files": "specs/S-*.md",
+        "mustAppearIn": [
+          "docs/roadmap.md"
+        ]
+      }
+    ]
   },
   "acceptCommands": []
 }
