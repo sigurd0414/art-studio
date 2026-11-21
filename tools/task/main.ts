@@ -14,7 +14,15 @@ import { cmdKitOutdated } from './cli/kitoutdated.ts';
 import { cmdFinish, cmdResume, cmdStart, cmdSubmit } from './cli/lifecycle.ts';
 import { cmdMerge } from './cli/merge.ts';
 import { cmdPropose } from './cli/propose.ts';
-import { CliUsageError, TaskFailure, loadTaskContext, usageError } from './cli/runtime.ts';
+import { cmdRequest, cmdRequestResult } from './cli/request.ts';
+import {
+  CliUsageError,
+  TaskFailure,
+  fail,
+  loadTaskContext,
+  usageError,
+  validateExternalDepartmentsInConfigFile,
+} from './cli/runtime.ts';
 import { cmdWait } from './cli/wait.ts';
 import {
   MAX_TICKET_AGENT_CHARS,
@@ -30,13 +38,18 @@ import type {
   ProposeArea,
   ProposeCommandArgs,
   ProposeRole,
+  RequestCommandArgs,
+  RequestResultCommandArgs,
   TicketPhase,
 } from './types.ts';
 
 const USAGE = [
-  '用法：node task.mjs <start|resume|submit|finish|scope-check|status|mine|worker-name|heartbeat|wait|accept|merge|propose|kit-check|kit-outdated|agent-check|docs-check|gate-check> [選項]',
+  '用法：node task.mjs <start|resume|submit|finish|scope-check|status|mine|worker-name|heartbeat|wait|accept|merge|propose|request|request-result|kit-check|kit-outdated|agent-check|docs-check|gate-check> [選項]',
   '  wait --next --worker <代號> [--interval-sec 60] [--timeout-sec 300]',
   '  wait <N> [--since <ISO時間>] [--interval-sec 60] [--timeout-sec 7200] [--worker <代號>]',
+  '  wait --dept <代碼> <M> [--since <ISO時間>] [--interval-sec 60] [--timeout-sec 7200]',
+  '  request --dept <代碼> --from <N> --title <標題> (--body <文字> | --body-file <檔案>) [--dry-run]',
+  '  request-result --dept <代碼> <M> --result pass|fail --note <一句話以上>',
   '  heartbeat --worker <代號> [--ticket <N> --phase <階段> [--agent <稱呼>] [--note <一句話>]]',
   '  accept <N> --as <驗收員代號> [--no-post]',
   '  merge <N> [--override <理由>] [--dry-run]',
@@ -47,8 +60,9 @@ const USAGE = [
 
 const WORKER_ALLOWED_CMDS = new Set(['start', 'resume', 'submit', 'heartbeat', 'wait', 'propose']);
 const WORKER_REQUIRED_CMDS = new Set(['start', 'resume', 'submit', 'heartbeat']);
+const PLANNER_ONLY_CMDS = new Set(['request', 'request-result']);
 const ISSUE_CMDS = new Set(['start', 'resume', 'submit', 'finish', 'scope-check', 'accept', 'merge']);
-const DRY_RUN_CMDS = new Set(['start', 'finish', 'merge', 'propose']);
+const DRY_RUN_CMDS = new Set(['start', 'finish', 'merge', 'propose', 'request']);
 const NO_ARG_CMDS = new Set(['status', 'worker-name', 'kit-check', 'kit-outdated', 'agent-check']);
 const KNOWN_CMDS = new Set([
   'start',
@@ -64,6 +78,8 @@ const KNOWN_CMDS = new Set([
   'accept',
   'merge',
   'propose',
+  'request',
+  'request-result',
   'kit-check',
   'kit-outdated',
   'agent-check',
@@ -74,10 +90,10 @@ const PROPOSE_MAX_TOTAL_CHARS = 4000;
 const PROPOSE_REF_ISSUE_RE = /^#[1-9]\d*$/;
 const PROPOSE_REF_HTTP_RE = /^https?:\/\/\S+$/;
 
-type ProposeScalarField = 'title' | 'target' | 'what' | 'suggest' | 'area' | 'role';
+type ProposeScalarField = 'target' | 'what' | 'suggest' | 'area' | 'role';
+type RequestScalarField = 'dept' | 'from' | 'body' | 'bodyFile' | 'result';
 
 interface ProposeRawOptions {
-  title: string | null;
   target: string | null;
   what: string | null;
   suggest: string | null;
@@ -86,13 +102,28 @@ interface ProposeRawOptions {
   refs: string[];
 }
 
+interface RequestRawOptions {
+  dept: string | null;
+  from: string | null;
+  body: string | null;
+  bodyFile: string | null;
+  result: string | null;
+}
+
 const PROPOSE_SCALAR_FLAGS: ReadonlyArray<{ flag: `--${ProposeScalarField}`; field: ProposeScalarField }> = [
-  { flag: '--title', field: 'title' },
   { flag: '--target', field: 'target' },
   { flag: '--what', field: 'what' },
   { flag: '--suggest', field: 'suggest' },
   { flag: '--area', field: 'area' },
   { flag: '--role', field: 'role' },
+];
+
+const REQUEST_SCALAR_FLAGS: ReadonlyArray<{ flag: string; field: RequestScalarField }> = [
+  { flag: '--dept', field: 'dept' },
+  { flag: '--from', field: 'from' },
+  { flag: '--body', field: 'body' },
+  { flag: '--body-file', field: 'bodyFile' },
+  { flag: '--result', field: 'result' },
 ];
 
 function isProposeArea(value: string): value is ProposeArea {
@@ -135,9 +166,28 @@ function parsePositiveIssueNum(rawNum: string): number {
 
 type MatchedProposeOption =
   | { kind: 'ref'; value: string; consumed: number }
-  | { kind: 'scalar'; field: ProposeScalarField; value: string; consumed: number };
+  | { kind: 'title'; value: string; consumed: number }
+  | { kind: 'propose'; field: ProposeScalarField; value: string; consumed: number }
+  | { kind: 'request'; field: RequestScalarField; value: string; consumed: number };
 
-function matchProposeValueOption(argv: readonly string[], index: number): MatchedProposeOption | null {
+function matchFlagValue<T extends string>(
+  argv: readonly string[],
+  index: number,
+  defs: ReadonlyArray<{ flag: string; field: T }>,
+): { field: T; value: string; consumed: number } | null {
+  const arg = argv[index];
+  for (const { flag, field } of defs) {
+    if (arg === flag) {
+      return { field, value: takeOptionValue(argv, index, flag), consumed: 1 };
+    }
+    if (arg.startsWith(`${flag}=`)) {
+      return { field, value: arg.slice(flag.length + 1), consumed: 0 };
+    }
+  }
+  return null;
+}
+
+function matchExtraValueOption(argv: readonly string[], index: number): MatchedProposeOption | null {
   const arg = argv[index];
   if (arg === '--ref') {
     return { kind: 'ref', value: takeOptionValue(argv, index, '--ref'), consumed: 1 };
@@ -145,13 +195,17 @@ function matchProposeValueOption(argv: readonly string[], index: number): Matche
   if (arg.startsWith('--ref=')) {
     return { kind: 'ref', value: arg.slice('--ref='.length), consumed: 0 };
   }
-  for (const { flag, field } of PROPOSE_SCALAR_FLAGS) {
-    if (arg === flag) {
-      return { kind: 'scalar', field, value: takeOptionValue(argv, index, flag), consumed: 1 };
-    }
-    if (arg.startsWith(`${flag}=`)) {
-      return { kind: 'scalar', field, value: arg.slice(flag.length + 1), consumed: 0 };
-    }
+  const titleMatch = matchFlagValue(argv, index, [{ flag: '--title', field: 'title' as const }]);
+  if (titleMatch) {
+    return { kind: 'title', value: titleMatch.value, consumed: titleMatch.consumed };
+  }
+  const proposeMatch = matchFlagValue(argv, index, PROPOSE_SCALAR_FLAGS);
+  if (proposeMatch) {
+    return { kind: 'propose', ...proposeMatch };
+  }
+  const reqMatch = matchFlagValue(argv, index, REQUEST_SCALAR_FLAGS);
+  if (reqMatch) {
+    return { kind: 'request', ...reqMatch };
   }
   return null;
 }
@@ -164,8 +218,13 @@ function readRequiredProposeField(raw: string | null, field: 'title' | 'target' 
   return text;
 }
 
-function validateProposeArgs(proposeOpts: ProposeRawOptions, worker: string, dryRun: boolean): ProposeCommandArgs {
-  const title = readRequiredProposeField(proposeOpts.title, 'title');
+function validateProposeArgs(
+  proposeOpts: ProposeRawOptions,
+  titleRaw: string | null,
+  worker: string,
+  dryRun: boolean,
+): ProposeCommandArgs {
+  const title = readRequiredProposeField(titleRaw, 'title');
   const target = readRequiredProposeField(proposeOpts.target, 'target');
   const what = readRequiredProposeField(proposeOpts.what, 'what');
   const suggest = readRequiredProposeField(proposeOpts.suggest, 'suggest');
@@ -281,6 +340,82 @@ function validateHeartbeatArgs({
   };
 }
 
+function validateRequestArgs(
+  requestOpts: RequestRawOptions,
+  titleRaw: string | null,
+  dryRun: boolean,
+): RequestCommandArgs {
+  const dept = typeof requestOpts.dept === 'string' ? requestOpts.dept.trim() : '';
+  if (!dept) {
+    usageError(`用法錯誤：request 缺少必要參數 --dept\n${USAGE}`);
+  }
+  if (requestOpts.from === null || !requestOpts.from.trim()) {
+    usageError(`用法錯誤：request 缺少必要參數 --from\n${USAGE}`);
+  }
+  const from = parsePositiveIssueNum(requestOpts.from.trim());
+  const title = typeof titleRaw === 'string' ? titleRaw.trim() : '';
+  if (!title) {
+    usageError(`用法錯誤：request 缺少必要參數 --title\n${USAGE}`);
+  }
+  if (requestOpts.body !== null && requestOpts.bodyFile !== null) {
+    usageError(`用法錯誤：request 不可同時使用 --body 與 --body-file\n${USAGE}`);
+  }
+  if (requestOpts.body === null && requestOpts.bodyFile === null) {
+    usageError(`用法錯誤：request 必須指定 --body 或 --body-file\n${USAGE}`);
+  }
+  const bodyFile = requestOpts.bodyFile !== null ? requestOpts.bodyFile.trim() : null;
+  if (bodyFile !== null && !bodyFile) {
+    usageError(`用法錯誤：request 的 --body-file 不可為空\n${USAGE}`);
+  }
+  return {
+    cmd: 'request',
+    issueNum: null,
+    sessionArg: '',
+    worker: '',
+    dryRun,
+    note: '',
+    dept,
+    from,
+    title,
+    body: requestOpts.body,
+    bodyFile,
+  };
+}
+
+function validateRequestResultArgs(
+  positionals: readonly string[],
+  requestOpts: RequestRawOptions,
+  note: string,
+  hasNoteFlag: boolean,
+): RequestResultCommandArgs {
+  if (positionals.length !== 2) {
+    usageError(`用法錯誤：request-result 需要單一正整數部門單號\n${USAGE}`);
+  }
+  const issueNum = parsePositiveIssueNum(positionals[1]);
+  const dept = typeof requestOpts.dept === 'string' ? requestOpts.dept.trim() : '';
+  if (!dept) {
+    usageError(`用法錯誤：request-result 缺少必要參數 --dept\n${USAGE}`);
+  }
+  const resultRaw = typeof requestOpts.result === 'string' ? requestOpts.result.trim() : '';
+  if (resultRaw !== 'pass' && resultRaw !== 'fail') {
+    usageError(`用法錯誤：request-result 的 --result 只接受 pass|fail（收到「${requestOpts.result ?? ''}」）\n${USAGE}`);
+  }
+  const trimmedNote = note.trim();
+  if (!hasNoteFlag || !trimmedNote) {
+    usageError(`用法錯誤：request-result 必須指定非空的 --note\n${USAGE}`);
+  }
+  return {
+    cmd: 'request-result',
+    issueNum,
+    sessionArg: '',
+    worker: '',
+    dryRun: false,
+    note: trimmedNote,
+    dept,
+    result: resultRaw,
+  };
+}
+
 function parseCliArgs(argv: readonly string[]): ParsedCliCommand {
   let dryRun = false;
   let workerFlag: string | null = null;
@@ -297,14 +432,21 @@ function parseCliArgs(argv: readonly string[]): ParsedCliCommand {
   let asFlag: string | null = null;
   let noPost = false;
   let overrideReason: string | null = null;
+  let titleFlag: string | null = null;
   const proposeOpts: ProposeRawOptions = {
-    title: null,
     target: null,
     what: null,
     suggest: null,
     area: null,
     role: null,
     refs: [],
+  };
+  const requestOpts: RequestRawOptions = {
+    dept: null,
+    from: null,
+    body: null,
+    bodyFile: null,
+    result: null,
   };
   const positionals: string[] = [];
 
@@ -371,12 +513,16 @@ function parseCliArgs(argv: readonly string[]): ParsedCliCommand {
     } else if (arg.startsWith('--since=')) {
       since = arg.slice('--since='.length);
     } else if (arg.startsWith('-')) {
-      const matched = matchProposeValueOption(argv, i);
+      const matched = matchExtraValueOption(argv, i);
       if (matched) {
         if (matched.kind === 'ref') {
           proposeOpts.refs.push(matched.value);
-        } else {
+        } else if (matched.kind === 'title') {
+          titleFlag = matched.value;
+        } else if (matched.kind === 'propose') {
           proposeOpts[matched.field] = matched.value;
+        } else {
+          requestOpts[matched.field] = matched.value;
         }
         i += matched.consumed;
       } else {
@@ -392,8 +538,7 @@ function parseCliArgs(argv: readonly string[]): ParsedCliCommand {
     usageError(`用法錯誤：${cmd ? `不認得的指令「${cmd}」` : '缺少指令'}\n${USAGE}`);
   }
 
-  const hasProposeFlags =
-    proposeOpts.title !== null ||
+  const hasProposeOnlyFlags =
     proposeOpts.target !== null ||
     proposeOpts.what !== null ||
     proposeOpts.suggest !== null ||
@@ -404,8 +549,8 @@ function parseCliArgs(argv: readonly string[]): ParsedCliCommand {
   if (dryRun && !DRY_RUN_CMDS.has(cmd)) {
     usageError(`用法錯誤：${cmd} 不支援 --dry-run\n${USAGE}`);
   }
-  if (hasNoteFlag && cmd !== 'submit' && cmd !== 'heartbeat') {
-    usageError(`用法錯誤：只有 submit 與 heartbeat 支援 --note\n${USAGE}`);
+  if (hasNoteFlag && cmd !== 'submit' && cmd !== 'heartbeat' && cmd !== 'request-result') {
+    usageError(`用法錯誤：只有 submit、heartbeat 與 request-result 支援 --note\n${USAGE}`);
   }
   if ((ticketRaw !== null || phaseRaw !== null || hasAgentFlag) && cmd !== 'heartbeat') {
     usageError(`用法錯誤：只有 heartbeat 支援 --ticket／--phase／--agent\n${USAGE}`);
@@ -425,15 +570,38 @@ function parseCliArgs(argv: readonly string[]): ParsedCliCommand {
   if (cmd === 'merge' && overrideReason !== null && !String(overrideReason).trim()) {
     usageError(`用法錯誤：merge 的 --override 理由不可為空\n${USAGE}`);
   }
-  if (hasProposeFlags && cmd !== 'propose') {
-    usageError(`用法錯誤：只有 propose 支援 --title／--target／--what／--suggest／--area／--ref／--role\n${USAGE}`);
+  if (titleFlag !== null && cmd !== 'propose' && cmd !== 'request') {
+    usageError(`用法錯誤：只有 propose 與 request 支援 --title\n${USAGE}`);
+  }
+  if (hasProposeOnlyFlags && cmd !== 'propose') {
+    usageError(`用法錯誤：只有 propose 支援 --target／--what／--suggest／--area／--ref／--role\n${USAGE}`);
+  }
+  if (requestOpts.dept !== null && cmd !== 'wait' && cmd !== 'request' && cmd !== 'request-result') {
+    usageError(`用法錯誤：只有 wait、request 與 request-result 支援 --dept\n${USAGE}`);
+  }
+  if ((requestOpts.from !== null || requestOpts.body !== null || requestOpts.bodyFile !== null) && cmd !== 'request') {
+    usageError(`用法錯誤：只有 request 支援 --from／--body／--body-file\n${USAGE}`);
+  }
+  if (requestOpts.result !== null && cmd !== 'request-result') {
+    usageError(`用法錯誤：只有 request-result 支援 --result\n${USAGE}`);
   }
   if (workerFlag !== null && !WORKER_ALLOWED_CMDS.has(cmd)) {
     usageError(`用法錯誤：${cmd} 不支援 --worker\n${USAGE}`);
   }
 
+  if (PLANNER_ONLY_CMDS.has(cmd)) {
+    const envWorker = typeof process.env.TASK_WORKER === 'string' ? process.env.TASK_WORKER.trim() : '';
+    if (envWorker) {
+      fail(`拒絕：${cmd} 只給規劃者使用，實作者（TASK_WORKER=${envWorker}）不可執行`);
+    }
+  }
+
+  const isWaitDept = cmd === 'wait' && requestOpts.dept !== null;
+  if (isWaitDept && workerFlag !== null) {
+    usageError(`用法錯誤：wait --dept 不支援 --worker\n${USAGE}`);
+  }
   let worker = '';
-  if (WORKER_ALLOWED_CMDS.has(cmd)) {
+  if (WORKER_ALLOWED_CMDS.has(cmd) && !isWaitDept) {
     const rawWorker = workerFlag !== null ? workerFlag : process.env.TASK_WORKER;
     worker = typeof rawWorker === 'string' ? rawWorker.trim() : '';
     const proposeRole = cmd === 'propose' ? (proposeOpts.role === null ? 'planner' : proposeOpts.role.trim()) : '';
@@ -503,7 +671,14 @@ function parseCliArgs(argv: readonly string[]): ParsedCliCommand {
     if (positionals.length !== 1) {
       usageError(`用法錯誤：propose 不接受額外位置參數\n${USAGE}`);
     }
-    return validateProposeArgs(proposeOpts, worker, dryRun);
+    return validateProposeArgs(proposeOpts, titleFlag, worker, dryRun);
+  } else if (cmd === 'request') {
+    if (positionals.length !== 1) {
+      usageError(`用法錯誤：request 不接受額外位置參數\n${USAGE}`);
+    }
+    return validateRequestArgs(requestOpts, titleFlag, dryRun);
+  } else if (cmd === 'request-result') {
+    return validateRequestResultArgs(positionals, requestOpts, note, hasNoteFlag);
   } else if (cmd === 'docs-check') {
     if (positionals.length !== 1) {
       usageError(`用法錯誤：docs-check 不接受額外位置參數\n${USAGE}`);
@@ -522,6 +697,9 @@ function parseCliArgs(argv: readonly string[]): ParsedCliCommand {
     };
   } else if (cmd === 'wait') {
     if (nextMode) {
+      if (requestOpts.dept !== null) {
+        usageError(`用法錯誤：wait 不可同時使用 --next 與 --dept\n${USAGE}`);
+      }
       if (positionals.length !== 1) {
         usageError(`用法錯誤：wait --next 不可同時指定單號\n${USAGE}`);
       }
@@ -540,6 +718,7 @@ function parseCliArgs(argv: readonly string[]): ParsedCliCommand {
         dryRun,
         note,
         nextMode: true,
+        dept: null,
         intervalSec: intervalSec ?? 60,
         timeoutSec: effectiveTimeout,
         since: null,
@@ -553,6 +732,10 @@ function parseCliArgs(argv: readonly string[]): ParsedCliCommand {
     if (since !== null && (!since.trim() || !Number.isFinite(Date.parse(since)))) {
       usageError(`用法錯誤：--since 必須是有效的 ISO 時間（收到「${since}」）\n${USAGE}`);
     }
+    const dept = requestOpts.dept !== null ? requestOpts.dept.trim() : null;
+    if (dept !== null && !dept) {
+      usageError(`用法錯誤：wait 的 --dept 不可為空\n${USAGE}`);
+    }
     return {
       cmd,
       issueNum,
@@ -561,6 +744,7 @@ function parseCliArgs(argv: readonly string[]): ParsedCliCommand {
       dryRun,
       note,
       nextMode: false,
+      dept,
       intervalSec: intervalSec ?? 60,
       timeoutSec: timeoutSec ?? 7200,
       since: since ? since.trim() : null,
@@ -573,20 +757,17 @@ function parseCliArgs(argv: readonly string[]): ParsedCliCommand {
 async function main(): Promise<unknown> {
   const argv = process.argv.slice(2);
   if (argv[0] === 'gate-check') {
-    return cmdGateCheck(process.cwd(), argv.slice(1));
+    const code = cmdGateCheck(process.cwd(), argv.slice(1));
+    validateExternalDepartmentsInConfigFile(process.cwd());
+    return code;
   }
   const parsed = parseCliArgs(argv);
-  if (parsed.cmd === 'kit-check') {
-    return cmdKitCheck(process.cwd());
-  }
-  if (parsed.cmd === 'kit-outdated') {
-    return cmdKitOutdated(process.cwd());
-  }
-  if (parsed.cmd === 'agent-check') {
+  if (parsed.cmd === 'kit-check' || parsed.cmd === 'kit-outdated' || parsed.cmd === 'agent-check' || parsed.cmd === 'docs-check') {
+    validateExternalDepartmentsInConfigFile(process.cwd());
+    if (parsed.cmd === 'docs-check') return cmdDocsCheck(process.cwd(), { since: parsed.since });
+    if (parsed.cmd === 'kit-check') return cmdKitCheck(process.cwd());
+    if (parsed.cmd === 'kit-outdated') return cmdKitOutdated(process.cwd());
     return cmdAgentCheck(process.cwd());
-  }
-  if (parsed.cmd === 'docs-check') {
-    return cmdDocsCheck(process.cwd(), { since: parsed.since });
   }
   const ctx = loadTaskContext(process.cwd());
 
@@ -617,6 +798,10 @@ async function main(): Promise<unknown> {
       return cmdMerge(ctx, parsed);
     case 'propose':
       return cmdPropose(ctx, parsed);
+    case 'request':
+      return cmdRequest(ctx, parsed);
+    case 'request-result':
+      return cmdRequestResult(ctx, parsed);
     default:
       usageError(USAGE);
   }

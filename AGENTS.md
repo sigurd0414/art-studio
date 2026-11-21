@@ -1,6 +1,6 @@
 # art-studio 專案規範（`AGENTS.md`）
 
-本檔是規劃者（Claude）與實作者（Antigravity）共用的唯一規則檔，由初始化套件 v0.2.5 產生。`CLAUDE.md` 只寫 `@AGENTS.md`，`GEMINI.md` 只寫「請遵守 AGENTS.md」。要改通用規則請改套件；本專案專屬的規則寫在第 10 節。
+本檔是規劃者（Claude）與實作者（Antigravity）共用的唯一規則檔，由初始化套件 v0.2.7 產生。`CLAUDE.md` 只寫 `@AGENTS.md`，`GEMINI.md` 只寫「請遵守 AGENTS.md」。要改通用規則請改套件；本專案專屬的規則寫在第 10 節。
 
 ## 1. 熱區（開工前必讀）與冷區
 

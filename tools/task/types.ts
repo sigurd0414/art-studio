@@ -75,6 +75,20 @@ export interface DocRulesConfig {
   readonly whenLines?: number;
 }
 
+export interface ExternalDepartmentConfig {
+  readonly code?: string;
+  readonly repo?: string;
+  readonly role?: string;
+  readonly label?: string;
+}
+
+export interface ExternalDepartment {
+  readonly code: string;
+  readonly repo: string;
+  readonly role: string;
+  readonly label?: string;
+}
+
 export interface ProjectConfig {
   readonly kitVersion?: string;
   readonly project?: string;
@@ -82,6 +96,7 @@ export interface ProjectConfig {
   readonly kitUpstream?: string;
   readonly officeUrl?: string;
   readonly repos: readonly RepoConfigEntry[];
+  readonly externalDepartments?: readonly ExternalDepartmentConfig[];
   readonly sensitive?: boolean;
   readonly public?: boolean;
   readonly containerDirs?: readonly string[];
@@ -429,11 +444,20 @@ export interface FileLineWarning {
   lineCount: number;
 }
 
+export interface IssueRepoDiffInfo {
+  repo: RuntimeRepo;
+  baseSha: string | null;
+  headSha: string;
+  wtPath: string | null;
+  fromLockPaths: Set<string>;
+}
+
 export interface IssueDiffSummary {
   checkedBranches: number;
   changedFiles: ChangedFileEntry[];
   fileLineWarnings: FileLineWarning[];
   lineCheck: BusinessLineAnalysis;
+  repoDiffs: IssueRepoDiffInfo[];
 }
 
 export interface CollectIssueDiffSummaryOptions {
@@ -463,6 +487,7 @@ export interface TaskContext {
   configDir: string;
   project: string;
   issueRepo: string;
+  externalDepartments: ExternalDepartment[];
   branchPattern: string;
   worktreeRoot: string;
   repos: RuntimeRepo[];
@@ -706,6 +731,8 @@ export interface DocsCheckCommandArgs {
   since: string | null;
 }
 
+export type RequestResultValue = 'pass' | 'fail';
+
 export interface WaitCommandArgs {
   cmd: 'wait';
   issueNum: number | null;
@@ -714,9 +741,35 @@ export interface WaitCommandArgs {
   dryRun: boolean;
   note: string;
   nextMode: boolean;
+  dept: string | null;
   intervalSec: number;
   timeoutSec: number;
   since: string | null;
+}
+
+export interface RequestCommandArgs {
+  cmd: 'request';
+  issueNum: null;
+  sessionArg: string;
+  worker: string;
+  dryRun: boolean;
+  note: string;
+  dept: string;
+  from: number;
+  title: string;
+  body: string | null;
+  bodyFile: string | null;
+}
+
+export interface RequestResultCommandArgs {
+  cmd: 'request-result';
+  issueNum: number;
+  sessionArg: string;
+  worker: string;
+  dryRun: false;
+  note: string;
+  dept: string;
+  result: RequestResultValue;
 }
 
 export interface ProposeCommandArgs {
@@ -744,6 +797,8 @@ export type ParsedCliCommand =
   | MergeCommandArgs
   | DocsCheckCommandArgs
   | WaitCommandArgs
+  | RequestCommandArgs
+  | RequestResultCommandArgs
   | ProposeCommandArgs;
 
 export interface KitManifest {

@@ -12,6 +12,7 @@ import {
   TaskConfigError,
   countTextFileLines,
   createTaskLib,
+  parseExternalDepartments,
   parseGitNumstatZ,
   parsePaginatedJsonArrays,
   parseUnifiedDiffU0Lines,
@@ -21,11 +22,13 @@ import type {
   CollectIssueDiffSummaryOptions,
   CollectRepoDiffWithLockOptions,
   DirLockOptions,
+  ExternalDepartment,
   FileLineWarning,
   GitCommandResult,
   GitHubComment,
   GitHubIssue,
   IssueDiffSummary,
+  IssueRepoDiffInfo,
   LockOwnerMeta,
   PathRuleEntry,
   ProjectConfig,
@@ -225,6 +228,10 @@ export function loadTaskContext(cwd = process.cwd()): TaskContext {
       : `task/${project}-{N}`;
 
   const issueRepo = resolveIssueRepo(config, repos);
+  const deptRes = parseExternalDepartments(config.externalDepartments, issueRepo);
+  if (!deptRes.ok) {
+    fail(deptRes.message);
+  }
 
   return {
     config,
@@ -232,6 +239,7 @@ export function loadTaskContext(cwd = process.cwd()): TaskContext {
     configDir,
     project,
     issueRepo,
+    externalDepartments: deptRes.departments,
     branchPattern,
     worktreeRoot,
     repos,
@@ -240,14 +248,42 @@ export function loadTaskContext(cwd = process.cwd()): TaskContext {
   };
 }
 
-export function fetchAllIssues(ctx: TaskContext): GitHubIssue[] {
-  const raw = runGh(['api', `repos/${ctx.issueRepo}/issues?state=all&per_page=100`, '--paginate']);
+/** 供不呼叫 loadTaskContext 的指令在讀設定檔時驗證 `externalDepartments`（格式錯誤以 1 結束，不碰 GitHub）。 */
+export function validateExternalDepartmentsInConfigFile(cwd = process.cwd()): void {
+  let rawConfig: unknown;
+  try {
+    const configPath = findConfigPath(cwd);
+    rawConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  } catch {
+    return;
+  }
+  if (!isRecord(rawConfig) || rawConfig.externalDepartments === undefined) return;
+  const issueRepo =
+    typeof rawConfig.issueRepo === 'string' && rawConfig.issueRepo.trim()
+      ? rawConfig.issueRepo.trim()
+      : null;
+  const res = parseExternalDepartments(rawConfig.externalDepartments, issueRepo);
+  if (!res.ok) {
+    fail(res.message);
+  }
+}
+
+export function resolveExternalDepartment(ctx: TaskContext, deptCode: string): ExternalDepartment {
+  const found = ctx.externalDepartments.find((dept) => dept.code === deptCode);
+  if (found) return found;
+  const codes = ctx.externalDepartments.map((dept) => dept.code);
+  const availableText = codes.length > 0 ? `已設定的部門代碼：${codes.join('、')}` : '目前未設定任何 externalDepartments';
+  fail(`找不到外部部門「${deptCode}」（${availableText}）`);
+}
+
+export function fetchAllIssues(ctx: TaskContext, repo = ctx.issueRepo): GitHubIssue[] {
+  const raw = runGh(['api', `repos/${repo}/issues?state=all&per_page=100`, '--paginate']);
   return parsePaginatedJsonArrays(raw).filter(isGitHubIssue);
 }
 
-export function fetchSingleIssue(ctx: TaskContext, issueNum: number): GitHubIssue | null {
+export function fetchSingleIssue(ctx: TaskContext, issueNum: number, repo = ctx.issueRepo): GitHubIssue | null {
   try {
-    const raw = runGh(['api', `repos/${ctx.issueRepo}/issues/${issueNum}`]);
+    const raw = runGh(['api', `repos/${repo}/issues/${issueNum}`]);
     const parsed: unknown = JSON.parse(raw);
     if (!isGitHubIssue(parsed)) return null;
     return parsed;
@@ -263,39 +299,79 @@ export function fetchSingleIssue(ctx: TaskContext, issueNum: number): GitHubIssu
   }
 }
 
-export function fetchIssueComments(ctx: TaskContext, issueNum: number): GitHubComment[] {
-  const raw = runGh(['api', `repos/${ctx.issueRepo}/issues/${issueNum}/comments?per_page=100`, '--paginate']);
+export function fetchIssueComments(ctx: TaskContext, issueNum: number, repo = ctx.issueRepo): GitHubComment[] {
+  const raw = runGh(['api', `repos/${repo}/issues/${issueNum}/comments?per_page=100`, '--paginate']);
   return parsePaginatedJsonArrays(raw).filter(isGitHubComment);
 }
 
-export function addIssueLabel(ctx: TaskContext, issueNum: number, label: string): void {
-  runGh(['api', '-X', 'POST', `repos/${ctx.issueRepo}/issues/${issueNum}/labels`, '-f', `labels[]=${label}`]);
+export function addIssueLabel(ctx: TaskContext, issueNum: number, label: string, repo = ctx.issueRepo): void {
+  runGh(['api', '-X', 'POST', `repos/${repo}/issues/${issueNum}/labels`, '-f', `labels[]=${label}`]);
 }
 
-export function removeIssueLabel(ctx: TaskContext, issueNum: number, label: string): void {
+export function removeIssueLabel(ctx: TaskContext, issueNum: number, label: string, repo = ctx.issueRepo): void {
   runGh([
     'api',
     '-X',
     'DELETE',
-    `repos/${ctx.issueRepo}/issues/${issueNum}/labels/${encodeURIComponent(label)}`,
+    `repos/${repo}/issues/${issueNum}/labels/${encodeURIComponent(label)}`,
   ]);
 }
 
-export function postIssueComment(ctx: TaskContext, issueNum: number, body: string): void {
+export function postIssueComment(ctx: TaskContext, issueNum: number, body: string, repo = ctx.issueRepo): void {
   runGh(
-    ['api', '-X', 'POST', `repos/${ctx.issueRepo}/issues/${issueNum}/comments`, '-F', 'body=@-'],
+    ['api', '-X', 'POST', `repos/${repo}/issues/${issueNum}/comments`, '-F', 'body=@-'],
     body,
   );
 }
 
-/** 先加新標籤再拿舊標籤；若拿舊標籤失敗則盡力還原新標籤。 */
-export function swapIssueLabels(ctx: TaskContext, issueNum: number, addLabel: string, removeLabel: string): void {
-  addIssueLabel(ctx, issueNum, addLabel);
+export function createRepoIssue(
+  repo: string,
+  payload: { title: string; body: string; labels: readonly string[] },
+): number {
+  const raw = runGh(
+    ['api', '-X', 'POST', `repos/${repo}/issues`, '--input', '-'],
+    JSON.stringify(payload),
+  );
+  let parsed: unknown;
   try {
-    removeIssueLabel(ctx, issueNum, removeLabel);
+    parsed = JSON.parse(raw);
+  } catch (err: unknown) {
+    fail(`解析 ${repo} 建立單回應失敗：${err instanceof Error ? err.message : String(err)}`);
+  }
+  const number = isRecord(parsed) ? parsed.number : undefined;
+  if (typeof number !== 'number' || !Number.isSafeInteger(number) || number <= 0) {
+    fail(`${repo} 建立單回應缺少有效的單號：${raw}`);
+  }
+  return number;
+}
+
+export function closeRepoIssue(repo: string, issueNum: number): void {
+  runGh([
+    'api',
+    '-X',
+    'PATCH',
+    `repos/${repo}/issues/${issueNum}`,
+    '-f',
+    'state=closed',
+    '-f',
+    'state_reason=completed',
+  ]);
+}
+
+/** 先加新標籤再拿舊標籤；若拿舊標籤失敗則盡力還原新標籤。 */
+export function swapIssueLabels(
+  ctx: TaskContext,
+  issueNum: number,
+  addLabel: string,
+  removeLabel: string,
+  repo = ctx.issueRepo,
+): void {
+  addIssueLabel(ctx, issueNum, addLabel, repo);
+  try {
+    removeIssueLabel(ctx, issueNum, removeLabel, repo);
   } catch (err: unknown) {
     try {
-      removeIssueLabel(ctx, issueNum, addLabel);
+      removeIssueLabel(ctx, issueNum, addLabel, repo);
     } catch {}
     throw err;
   }
@@ -703,8 +779,8 @@ export function collectRepoDiffWithLock({
 }
 
 /**
- * 統計任務分支相對於基準分支的變更檔、業務程式新增行數與單檔軟上限警告。
- * @why 讓 scope-check 與 submit 共用同一套 git diff 取樣與 lib.ts 行數計算邏輯。
+ * 統計任務分支相對於基準分支的變更檔、業務程式新增行數、單檔軟上限警告與各倉 merge-base／HEAD／鎖定檔集合。
+ * @why 讓 scope-check、submit 與交件前檢查共用同一套 git diff 取樣與 lib.ts 行數計算邏輯，避免重複計算。
  */
 export function collectIssueDiffSummary(
   ctx: TaskContext,
@@ -718,6 +794,7 @@ export function collectIssueDiffSummary(
   const changedFiles: ChangedFileEntry[] = [];
   const repoDiffEntries: RepoDiffEntry[] = [];
   const fileLineWarnings: FileLineWarning[] = [];
+  const repoDiffs: IssueRepoDiffInfo[] = [];
   let checkedBranches = 0;
 
   const lockSha = parseLockCommitSha(targetBody);
@@ -753,8 +830,9 @@ export function collectIssueDiffSummary(
     const baseMainRef = baseRef === 'origin/main' ? 'refs/remotes/origin/main' : 'refs/heads/main';
     const baseMainRes = runGit(repo.mainRepoPath, ['rev-parse', '--verify', '-q', `${baseMainRef}^{commit}`]);
     const originMainSha = baseMainRes.ok ? baseMainRes.stdout.trim() : null;
+    const baseSha = resolveMergeBase(repo.mainRepoPath, originMainSha, headSha);
 
-    const diffRange = `${baseRef}...${targetRef}`;
+    const diffRange = baseSha ? `${baseSha}..${headSha}` : `${baseRef}...${targetRef}`;
     const diffResult = collectRepoDiffWithLock({
       lib: ctx.lib,
       repo,
@@ -774,6 +852,14 @@ export function collectIssueDiffSummary(
       fail(`${errorLabel}：${diffResult.errorDetail}`);
     }
     checkedBranches += 1;
+
+    repoDiffs.push({
+      repo,
+      baseSha,
+      headSha,
+      wtPath: fs.existsSync(wtPath) ? wtPath : null,
+      fromLockPaths: diffResult.fromLockPaths,
+    });
 
     repoDiffEntries.push({
       repo: repo.key,
@@ -803,5 +889,5 @@ export function collectIssueDiffSummary(
     limitOverride: lineLimit,
   });
 
-  return { checkedBranches, changedFiles, fileLineWarnings, lineCheck };
+  return { checkedBranches, changedFiles, fileLineWarnings, lineCheck, repoDiffs };
 }

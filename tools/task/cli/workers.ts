@@ -307,15 +307,14 @@ export function isWorkerAlive(worker: WorkerRecord | null | undefined, nowMs: nu
   return nowMs - hbMs <= limits.heartbeatAliveMinutes * 60 * 1000;
 }
 
-/** 檢查實作者最近是否仍有回來找單（優先看 lastPollAt，無該欄時改看 heartbeatAt）。 */
+/** 檢查實作者最近是否仍有回來找單（只看 lastPollAt；沒有該欄代表從未透過 wait --next 找單，不算輪詢中）。 */
 export function isWorkerPollFresh(
   worker: WorkerRecord | null | undefined,
   nowMs: number,
   limits: Pick<WorkerLimits, 'pollFreshMinutes'> | null | undefined,
 ): boolean {
-  if (!worker || worker.role !== 'active') return false;
-  const pollAt = worker.lastPollAt || worker.heartbeatAt || '';
-  const pollMs = Date.parse(pollAt);
+  if (!worker || worker.role !== 'active' || !worker.lastPollAt) return false;
+  const pollMs = Date.parse(worker.lastPollAt);
   const freshMinutes = limits?.pollFreshMinutes ?? DEFAULT_WORKER_LIMITS.pollFreshMinutes;
   return Number.isFinite(pollMs) && nowMs - pollMs <= freshMinutes * 60 * 1000;
 }

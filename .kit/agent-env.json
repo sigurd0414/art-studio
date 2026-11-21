@@ -3,7 +3,7 @@
   "tools": {
     "claude-code": {
       "detected": true,
-      "version": "2.1.329 (Claude Code)"
+      "version": "2.1.330 (Claude Code)"
     },
     "antigravity": {
       "detected": false,

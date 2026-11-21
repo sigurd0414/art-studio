@@ -13,6 +13,7 @@ import type {
   EvaluateStartFailureCode,
   EvaluateStartOptions,
   EvaluateStartResult,
+  ExternalDepartment,
   GitAheadBehind,
   GitHubComment,
   GitHubIssue,
@@ -40,6 +41,10 @@ export const DEFAULT_SOFT_FILE_LINE_LIMIT = 1200;
 export const DEFAULT_REWORK_GRACE_MINUTES = 15;
 
 const REPO_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const CROSS_REPO_REF_PREFIX_RE = /[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+const DEPT_CODE_RE = /^[a-z][a-z0-9-]{0,31}$/;
+const DEPT_ROLE_RE = /^[a-z][a-z0-9-]*$/;
+const DEPT_REPO_RE = /^[^/\s?#]+\/[^/\s?#]+$/;
 
 /** 設定檔驗證失敗時拋出的具名錯誤。 */
 export class TaskConfigError extends Error {
@@ -148,6 +153,8 @@ export function parsePrerequisites(body: string | null | undefined): number[] {
   if (section === null) return [];
   const nums: number[] = [];
   for (const m of section.matchAll(/#(\d+)/g)) {
+    // @why 跨倉庫參照（owner/name#N）不是本倉庫的前置單號，例如部門單內文的「需求來源：owner/repo#N」
+    if (CROSS_REPO_REF_PREFIX_RE.test(section.slice(0, m.index ?? 0))) continue;
     const n = Number(m[1]);
     if (!nums.includes(n)) nums.push(n);
   }
@@ -569,6 +576,49 @@ function parsePlainPathPatterns(rawList: unknown, fieldName: string): string[] {
 function normalizeContainerDirs(rawDirs: unknown): string[] {
   if (!Array.isArray(rawDirs)) return [];
   return rawDirs.map((d) => stripPatternSlashes(typeof d === 'string' ? d : '')).filter(Boolean);
+}
+
+export type ExternalDepartmentsResult = { ok: true; departments: ExternalDepartment[] } | { ok: false; message: string };
+
+/** 驗證並解析設定檔的 `externalDepartments` 清單（S-038 第 1 節）。 */
+export function parseExternalDepartments(raw: unknown, issueRepo: string | null = null): ExternalDepartmentsResult {
+  if (raw === undefined) return { ok: true, departments: [] };
+  if (!Array.isArray(raw)) {
+    return { ok: false, message: `設定檔錯誤：externalDepartments 必須是陣列（${JSON.stringify(raw)}）` };
+  }
+  const departments: ExternalDepartment[] = [];
+  const seenCodes = new Set<string>();
+  const seenRepos = new Set<string>();
+  const ownerRepo = issueRepo ? issueRepo.trim().toLowerCase() : null;
+  for (let i = 0; i < raw.length; i += 1) {
+    const item = raw[i];
+    const failDept = (detail: string): ExternalDepartmentsResult => ({
+      ok: false,
+      message: `設定檔錯誤：externalDepartments[${i}] ${detail}（${JSON.stringify(item)}）`,
+    });
+    if (!isRecord(item)) return failDept('必須是物件');
+    if (typeof item.code !== 'string' || !DEPT_CODE_RE.test(item.code)) {
+      return failDept('的 code 格式錯誤（必填，^[a-z][a-z0-9-]{0,31}$）');
+    }
+    if (seenCodes.has(item.code)) return failDept(`的 code「${item.code}」重複`);
+    if (typeof item.repo !== 'string' || !DEPT_REPO_RE.test(item.repo)) {
+      return failDept('的 repo 格式錯誤（必填，owner/name）');
+    }
+    const repoLower = item.repo.toLowerCase();
+    if (ownerRepo && repoLower === ownerRepo) return failDept(`的 repo 不可等於 issueRepo（${issueRepo}）`);
+    if (seenRepos.has(repoLower)) return failDept(`的 repo「${item.repo}」重複`);
+    if (typeof item.role !== 'string' || !DEPT_ROLE_RE.test(item.role)) {
+      return failDept('的 role 格式錯誤（必填，^[a-z][a-z0-9-]*$）');
+    }
+    if (item.label !== undefined && (typeof item.label !== 'string' || !item.label.trim() || [...item.label].length > 20)) {
+      return failDept('的 label 格式錯誤（選填，1～20 字非空字串）');
+    }
+    seenCodes.add(item.code);
+    seenRepos.add(repoLower);
+    const label = typeof item.label === 'string' ? item.label.trim() : undefined;
+    departments.push(label ? { code: item.code, repo: item.repo, role: item.role, label } : { code: item.code, repo: item.repo, role: item.role });
+  }
+  return { ok: true, departments };
 }
 
 interface ParsedConfigInternal {

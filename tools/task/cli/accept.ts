@@ -35,6 +35,7 @@ import { checkAcceptCodeRules } from './coderules.ts';
 import { checkAcceptDocRules } from './docs.ts';
 import { checkAcceptGate, parseGatedPaths } from './gate.ts';
 import { parseValidatedScope } from './inspect.ts';
+import { findProtectedPathViolations, parseProtectedPathRules } from './precheck.ts';
 import {
   DEFAULT_ACCEPTANCE_PATHS,
   acquireDirLock,
@@ -42,7 +43,6 @@ import {
   fail,
   fetchIssueComments,
   fetchSingleIssue,
-  fileMatchesPathRules,
   isFileSameAsUpdatedMain,
   isFileUnchangedBetween,
   parseLockCommitSha,
@@ -53,19 +53,6 @@ import {
 } from './runtime.ts';
 import { setAcceptTicketPhase } from './workers.ts';
 import { formatTaskBranch, getAffectedRepoKeys } from './worktrees.ts';
-
-const DEFAULT_PROTECTED_PATHS = Object.freeze([
-  'AGENTS.md',
-  'CLAUDE.md',
-  'GEMINI.md',
-  'docs/**',
-  'specs/**',
-  'project.config.json',
-  'tests/acceptance/**',
-  '**/tests/acceptance/**',
-  '**/tests/acceptance_*',
-  'fixtures/*/expected/**',
-]);
 
 const DEFAULT_ACCEPT_COMMANDS: readonly AcceptCommandRule[] = Object.freeze([
   { name: 'check', run: './tools/check.sh', timeoutSec: 1500, when: ['if-exists:tools/check.sh'], env: {} },
@@ -487,14 +474,7 @@ function inspectAffectedRepo({
   result.repoLockFullSha = repoLockFullSha;
   result.changedFiles = diffResult.changedFiles;
   result.fromLockPaths = diffResult.fromLockPaths;
-  for (const entry of result.changedFiles) {
-    if (fileMatchesPathRules(ctx.lib, protectedRules, repo.key, entry.pattern)) {
-      const listedVerbatim = scope.entries.some((e) => e.repo === repo.key && e.pattern === entry.pattern);
-      if (!listedVerbatim) {
-        result.protectedViolations.push(entry.raw);
-      }
-    }
-  }
+  result.protectedViolations = findProtectedPathViolations(ctx.lib, protectedRules, result.changedFiles, scope);
 
   result.scopeViolations = ctx.lib.findOutOfScopeFiles(result.changedFiles, scope.entries).map((f) => f.raw);
 
@@ -985,12 +965,7 @@ export async function cmdAccept(
     const lockSha = parseLockCommitSha(target.body);
     const hasPerfSection = extractSection(target.body, '效能') !== null;
 
-    const protectedRules = parsePathRuleEntries(
-      ctx.config.protectedPaths,
-      DEFAULT_PROTECTED_PATHS,
-      ctx.repoByKey,
-      'protectedPaths',
-    );
+    const protectedRules = parseProtectedPathRules(ctx);
     const acceptanceRules = parsePathRuleEntries(
       ctx.config.acceptancePaths,
       DEFAULT_ACCEPTANCE_PATHS,

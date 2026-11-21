@@ -1,7 +1,7 @@
 // @module templates/bin/task/cli/wait
-// @role 通用 task 工具的等待指令模組：實作 wait --next（常駐輪詢找下一張派工與主資料夾快轉）與 wait <N>（等待規劃者或使用者回覆）
-// @why 將常駐接單的輪詢迴圈、主資料夾自動快轉與提問等待集中於獨立模組，且保證 wait --next 不寫入 GitHub
-// @forbid 禁止在 wait --next 寫入 GitHub，或針對特定專案與測試資料寫死特例
+// @role 通用 task 工具的等待指令模組：實作 wait --next（常駐輪詢找下一張派工與主資料夾快轉）、wait <N>（等待規劃者或使用者回覆）與 wait --dept（等待外部部門交件或回覆）
+// @why 將常駐接單的輪詢迴圈、主資料夾自動快轉、提問等待與跨部門需求等待集中於獨立模組，且保證 wait --next 與 wait --dept 不寫入 GitHub
+// @forbid 禁止在 wait --next 或 wait --dept 寫入 GitHub，或針對特定專案與測試資料寫死特例
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,6 +14,7 @@ import {
   fetchIssueComments,
   fetchSingleIssue,
   postIssueComment,
+  resolveExternalDepartment,
   runGit,
   usageError,
 } from './runtime.ts';
@@ -359,6 +360,69 @@ function findFirstPlannerOrUserReply(
   return replies.length > 0 ? replies[0] : null;
 }
 
+async function runPollingWaitLoop({
+  intervalSec,
+  timeoutSec,
+  failPrefix,
+  timeoutMessage,
+  beforePoll,
+  checkOnce,
+  onTimeout,
+  sleepStep,
+}: {
+  intervalSec: number;
+  timeoutSec: number;
+  failPrefix: string;
+  timeoutMessage: string;
+  beforePoll?: () => Promise<void>;
+  checkOnce: (startedAtMs: number) => Promise<number | null>;
+  onTimeout?: () => void;
+  sleepStep: (waitMs: number) => Promise<void>;
+}): Promise<number> {
+  const startedAtMs = Date.now();
+  const intervalMs = intervalSec * 1000;
+  const deadlineMs = startedAtMs + timeoutSec * 1000;
+  let consecutiveFailures = 0;
+
+  while (true) {
+    if (beforePoll) {
+      await beforePoll();
+    }
+
+    try {
+      const doneCode = await checkOnce(startedAtMs);
+      if (doneCode !== null) {
+        return doneCode;
+      }
+      consecutiveFailures = 0;
+    } catch (err: unknown) {
+      const nonRetryable = err instanceof TaskFailure && Boolean(err.nonRetryable);
+      if (nonRetryable || (!(err instanceof TaskFailure) && !(err instanceof SyntaxError))) {
+        throw err;
+      }
+      consecutiveFailures += 1;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`${failPrefix}（第 ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES} 次）：${msg}`);
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        console.error(`連續 ${MAX_CONSECUTIVE_FAILURES} 次查詢失敗，中止等待：${msg}`);
+        return EXIT_CODE.FAIL;
+      }
+    }
+
+    const remainingMs = deadlineMs - Date.now();
+    if (remainingMs <= 0) {
+      if (onTimeout) {
+        onTimeout();
+      }
+      console.error(timeoutMessage);
+      return EXIT_CODE.TIMEOUT;
+    }
+
+    const waitMs = intervalMs === 0 ? 10 : Math.min(intervalMs, remainingMs);
+    await sleepStep(waitMs);
+  }
+}
+
 async function runWaitForIssue(
   ctx: TaskContext,
   {
@@ -370,22 +434,21 @@ async function runWaitForIssue(
   }: Pick<WaitCommandArgs, 'worker' | 'since' | 'intervalSec' | 'timeoutSec'> & { issueNum: number },
 ): Promise<number> {
   const limits = loadWorkerLimits(ctx.config);
-  const startedAtMs = Date.now();
-  const intervalMs = intervalSec * 1000;
-  const deadlineMs = startedAtMs + timeoutSec * 1000;
   const timeoutLabel = formatDurationZh(timeoutSec);
 
   console.log(`等待 #${issueNum} 的回覆：每 ${intervalSec} 秒查一次，最多等 ${timeoutLabel}。`);
 
   let sinceMs: number | null = since ? Date.parse(since) : null;
-  let consecutiveFailures = 0;
 
-  while (true) {
-    if (worker) {
-      await touchWorkerHeartbeatIfExists(ctx, worker, { ticketNum: issueNum, phase: 'blocked' });
-    }
-
-    try {
+  return runPollingWaitLoop({
+    intervalSec,
+    timeoutSec,
+    failPrefix: `查詢 #${issueNum} 留言失敗`,
+    timeoutMessage: `等待 #${issueNum} 回覆逾時（已等 ${timeoutLabel}），結束等待。`,
+    beforePoll: worker
+      ? () => touchWorkerHeartbeatIfExists(ctx, worker, { ticketNum: issueNum, phase: 'blocked' })
+      : undefined,
+    checkOnce: async (startedAtMs) => {
       const comments = fetchIssueComments(ctx, issueNum);
       if (sinceMs === null) {
         let latestImplMs: number | null = null;
@@ -426,51 +489,132 @@ async function runWaitForIssue(
         return EXIT_CODE.OK;
       }
 
-      consecutiveFailures = 0;
       console.log(`仍在等待…（已等 ${formatElapsedZh(Date.now() - startedAtMs)}）`);
-    } catch (err: unknown) {
-      const nonRetryable = err instanceof TaskFailure && Boolean(err.nonRetryable);
-      if (nonRetryable || (!(err instanceof TaskFailure) && !(err instanceof SyntaxError))) {
-        throw err;
-      }
-      consecutiveFailures += 1;
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`查詢 #${issueNum} 留言失敗（第 ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES} 次）：${msg}`);
-      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        console.error(`連續 ${MAX_CONSECUTIVE_FAILURES} 次查詢失敗，中止等待：${msg}`);
-        return EXIT_CODE.FAIL;
-      }
-    }
-
-    const remainingMs = deadlineMs - Date.now();
-    if (remainingMs <= 0) {
-      if (worker) {
-        try {
-          postIssueComment(
-            ctx,
-            issueNum,
-            [
-              `🛠️ ${worker}`,
-              `⏳ 等待逾時：已等 ${timeoutLabel}，#${issueNum} 仍沒有規劃者或使用者的新回覆。`,
-              '請負責這張單的對話回覆；若問題要問別的對話，請照協議開成對方看得到的單。',
-            ].join('\n'),
-          );
-        } catch (err: unknown) {
-          console.error(`寫入逾時留言失敗：${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    },
+    onTimeout: worker
+      ? () => {
+          try {
+            postIssueComment(
+              ctx,
+              issueNum,
+              [
+                `🛠️ ${worker}`,
+                `⏳ 等待逾時：已等 ${timeoutLabel}，#${issueNum} 仍沒有規劃者或使用者的新回覆。`,
+                '請負責這張單的對話回覆；若問題要問別的對話，請照協議開成對方看得到的單。',
+              ].join('\n'),
+            );
+          } catch (err: unknown) {
+            console.error(`寫入逾時留言失敗：${err instanceof Error ? err.message : String(err)}`);
+          }
         }
-      }
-      console.error(`等待 #${issueNum} 回覆逾時（已等 ${timeoutLabel}），結束等待。`);
-      return EXIT_CODE.TIMEOUT;
-    }
+      : undefined,
+    sleepStep: (waitMs) =>
+      sleepIssueWaitWithHeartbeat(ctx, {
+        waitMs,
+        worker,
+        issueNum,
+        heartbeatAliveMinutes: limits.heartbeatAliveMinutes,
+      }),
+  });
+}
 
-    const waitMs = intervalMs === 0 ? 10 : Math.min(intervalMs, remainingMs);
-    await sleepIssueWaitWithHeartbeat(ctx, {
-      waitMs,
-      worker,
-      issueNum,
-      heartbeatAliveMinutes: limits.heartbeatAliveMinutes,
-    });
+function isClaudeDeptComment(comment: GitHubComment): boolean {
+  const firstLine = String(comment.body ?? '').replace(/\r\n/g, '\n').split('\n')[0].trimStart();
+  return firstLine.startsWith('🤖 Claude');
+}
+
+function hasDeptDeliveryMarker(comment: GitHubComment): boolean {
+  const lines = String(comment.body ?? '').replace(/\r\n/g, '\n').split('\n');
+  return lines.some((line) => line.trim() === '📦 交件');
+}
+
+function resolveDeptWaitSinceMs(
+  issue: GitHubIssue,
+  sortedComments: readonly GitHubComment[],
+  explicitSinceMs: number | null,
+  startedAtMs: number,
+): number {
+  if (explicitSinceMs !== null) {
+    return explicitSinceMs;
   }
+  let latestClaudeMs: number | null = null;
+  for (const comment of sortedComments) {
+    if (!isClaudeDeptComment(comment)) continue;
+    const ms = Date.parse(comment.created_at || '');
+    if (Number.isFinite(ms) && (latestClaudeMs === null || ms > latestClaudeMs)) {
+      latestClaudeMs = ms;
+    }
+  }
+  if (latestClaudeMs !== null) {
+    return latestClaudeMs;
+  }
+  const createdMs = Date.parse(issue.created_at || '');
+  return Number.isFinite(createdMs) ? createdMs : startedAtMs;
+}
+
+async function runWaitForDept(
+  ctx: TaskContext,
+  {
+    deptCode,
+    issueNum,
+    since,
+    intervalSec,
+    timeoutSec,
+  }: Pick<WaitCommandArgs, 'since' | 'intervalSec' | 'timeoutSec'> & { deptCode: string; issueNum: number },
+): Promise<number> {
+  const dept = resolveExternalDepartment(ctx, deptCode);
+  const timeoutLabel = formatDurationZh(timeoutSec);
+  const explicitSinceMs = since ? Date.parse(since) : null;
+
+  console.error(`等待部門 ${dept.code}（${dept.repo}#${issueNum}）：每 ${intervalSec} 秒查一次，最多等 ${timeoutLabel}。`);
+
+  return runPollingWaitLoop({
+    intervalSec,
+    timeoutSec,
+    failPrefix: `查詢 ${dept.repo}#${issueNum} 留言失敗`,
+    timeoutMessage: `等待 ${dept.repo}#${issueNum} 回覆逾時（已等 ${timeoutLabel}），結束等待。`,
+    checkOnce: async (startedAtMs) => {
+      const issue = fetchSingleIssue(ctx, issueNum, dept.repo);
+      if (!issue) {
+        throw new TaskFailure(`找不到 ${dept.repo}#${issueNum}`, { nonRetryable: true });
+      }
+      const sortedComments = fetchIssueComments(ctx, issueNum, dept.repo)
+        .filter((c) => c && typeof c === 'object')
+        .sort((a, b) => (Date.parse(a.created_at || '') || 0) - (Date.parse(b.created_at || '') || 0));
+
+      const sinceMs = resolveDeptWaitSinceMs(issue, sortedComments, explicitSinceMs, startedAtMs);
+      const newNonClaudeComments = sortedComments.filter((comment) => {
+        if (isClaudeDeptComment(comment)) return false;
+        const ms = Date.parse(comment.created_at || '');
+        return Number.isFinite(ms) && ms > sinceMs;
+      });
+
+      const deliveredComments = newNonClaudeComments.filter(hasDeptDeliveryMarker);
+      if (deliveredComments.length > 0) {
+        const delivered = deliveredComments[deliveredComments.length - 1];
+        console.log('DEPT_EVENT=delivered');
+        console.log(delivered.body ?? '');
+        return EXIT_CODE.OK;
+      }
+
+      if (newNonClaudeComments.length > 0) {
+        console.log('DEPT_EVENT=comment');
+        console.log(newNonClaudeComments[0].body ?? '');
+        return EXIT_CODE.OK;
+      }
+
+      if (issue.state === 'closed') {
+        console.log('DEPT_EVENT=closed');
+        console.log(`${dept.repo}#${issueNum} 已關閉，不再等待。`);
+        return EXIT_CODE.OK;
+      }
+
+      console.error(`仍在等待…（已等 ${formatElapsedZh(Date.now() - startedAtMs)}）`);
+      return null;
+    },
+    sleepStep: (waitMs) => sleep(waitMs),
+  });
 }
 
 export async function cmdWait(ctx: TaskContext, opts: WaitCommandArgs): Promise<number> {
@@ -479,6 +623,9 @@ export async function cmdWait(ctx: TaskContext, opts: WaitCommandArgs): Promise<
   }
   if (opts.issueNum === null) {
     usageError('用法錯誤：wait 需要單一正整數單號或 --next');
+  }
+  if (opts.dept !== null) {
+    return runWaitForDept(ctx, { ...opts, deptCode: opts.dept, issueNum: opts.issueNum });
   }
   return runWaitForIssue(ctx, { ...opts, issueNum: opts.issueNum });
 }

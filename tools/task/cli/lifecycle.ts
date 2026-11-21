@@ -8,6 +8,7 @@ import path from 'node:path';
 import { getLabelNames } from '../lib.ts';
 import type { EvaluateStartResult, IssueCommandArgs, RuntimeRepo, TaskContext } from '../types.ts';
 import { parseValidatedScope, verifyIssueScopeAndLines } from './inspect.ts';
+import { runSubmitPrecheck } from './precheck.ts';
 import {
   acquireDirLock,
   addIssueLabel,
@@ -294,6 +295,17 @@ export async function cmdSubmit(
     failPrefix: '拒絕交件',
   });
 
+  const precheck = runSubmitPrecheck({
+    ctx,
+    scope,
+    affectedRepos,
+    issueBody: target.body,
+    summary,
+  });
+  if (!precheck.passed) {
+    fail(precheck.errorMessage);
+  }
+
   for (const item of reposToPush) {
     const pushRes = runGit(item.wtPath, ['push', 'origin', branchName]);
     if (!pushRes.ok) {
@@ -308,6 +320,7 @@ export async function cmdSubmit(
     ...reposToPush.map((item) => `- ${item.repo.key}：${branchName} @ ${item.headSha}`),
     '',
     `業務程式新增：${summary.lineCheck.totalAdded}／${summary.lineCheck.limit} 行`,
+    precheck.commentLine,
   ];
   if (note && note.trim()) {
     commentLines.push('', note.trim());
