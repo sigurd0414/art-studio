@@ -2,11 +2,11 @@
 
 版本：1.0。最後確認日期：2026-11-22。
 
-需求來源：[agent-office#122](https://github.com/sigurd0414/agent-office/issues/122)；部門單：[art-studio#8](https://github.com/sigurd0414/art-studio/issues/9)。依 S-043 T3，沿用[原圖去背](../skills/gpt-original-cutout.md)、[牆面方向自檢](../skills/wall-mounted-orientation.md)、[風格來源](../styles/agent-office.md)。
+需求來源：[agent-office#122](https://github.com/sigurd0414/agent-office/issues/122)；部門單：[art-studio#9](https://github.com/sigurd0414/art-studio/issues/9)。依 S-043 T3，沿用[原圖去背](../skills/gpt-original-cutout.md)、[牆面方向自檢](../skills/wall-mounted-orientation.md)、[風格來源](../styles/agent-office.md)。
 
 ## 設計與整理
 
-只用內建 imagegen。線框只作擺放範圍，物件保持真實設計。西牆邊線向右上升，北牆向右下降，2:1、垂直邊垂直。電視兩格共用畫布與位置，只改畫面內容。
+只用內建 imagegen。線框只作擺放範圍，物件保持真實設計。本批全部為北牆物件，邊線向右下降，2:1、垂直邊垂直。
 
 本批6件皆北牆，畫框、證書、月曆、海報與冷氣保持自然設計；層架為木板、兩端金屬壁軌、小書本與盆栽，留鏤空，並未填滿線框。冷氣與海報下緣經生圖修正，所有物件邊線向右下降，垂直邊垂直。
 
@@ -16,7 +16,7 @@
 
 ## 檢查
 
-交件前拉 agent-office 最新 main `95bfed4f6d1c1a498b487797aa6e3d52c72680d4`，原版check檢查6張全部PASS，outside均0，box角均2/2。未改業務程式、檢查器、幾何或驗收測試。自然外形與動畫最後由使用者看圖確認。
+交件前拉 agent-office 最新 main `95bfed4f6d1c1a498b487797aa6e3d52c72680d4`，原版check檢查6張全部PASS，outside均0，box角均2/2。未改業務程式、檢查器、幾何或驗收測試。自然外形最後由使用者看圖確認。
 
 | 代碼 | 顯示寬×高 | 原圖px | 去背px | 裁框 |
 | :--- | :--- | :--- | :--- | :--- |
