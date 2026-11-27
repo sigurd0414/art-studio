@@ -132,36 +132,19 @@ prompts/README.md
 **要做的事**
 
 1. 用 `git mv` 改名，內容只改檔內互相引用的相對路徑（例如 `agent-office.md` → `../agent-office.md`、`../skills/` → `../../skills/`）：
-   | 舊檔名 | 新檔名 | 部門單／需求方單 |
+   | 舊檔名（原在 `prompts/` 底下） | 新檔名 | 部門單／需求方單 |
    | :--- | :--- | :--- |
-   | `prompts/agent-office-redraw-batch1.md` | `prompts/batches/agent-office-118.md` | #5／agent-office#118 |
-   | `prompts/agent-office-redraw-batch2.md` | `prompts/batches/agent-office-119.md` | #6／agent-office#119 |
-   | `prompts/agent-office-redraw-batch3.md` | `prompts/batches/agent-office-120.md` | #7／agent-office#120 |
-   | `prompts/agent-office-redraw-batch4.md` | `prompts/batches/agent-office-121.md` | #8／agent-office#121 |
-   | `prompts/agent-office-redraw-batch5.md` | `prompts/batches/agent-office-122.md` | #9／agent-office#122 |
-   | `prompts/agent-office-redraw-fix-1.md` | `prompts/batches/agent-office-119-fix-1.md` | #10／agent-office#119（同一需求單的第二次需求） |
+   | `agent-office-redraw-batch1.md` | `prompts/batches/agent-office-118.md` | #5／agent-office#118 |
+   | `agent-office-redraw-batch2.md` | `prompts/batches/agent-office-119.md` | #6／agent-office#119 |
+   | `agent-office-redraw-batch3.md` | `prompts/batches/agent-office-120.md` | #7／agent-office#120 |
+   | `agent-office-redraw-batch4.md` | `prompts/batches/agent-office-121.md` | #8／agent-office#121 |
+   | `agent-office-redraw-batch5.md` | `prompts/batches/agent-office-122.md` | #9／agent-office#122 |
+   | `agent-office-redraw-fix-1.md` | `prompts/batches/agent-office-119-fix-1.md` | #10／agent-office#119（同一需求單的第二次需求） |
 2. `prompts/README.md` 兩張表補上這六份（批次紀錄的「目前版本」欄填 `—`；範本版本記在批次表）；順手把 #1、#2 兩列的「目前版本」也改成 `—`（#3 合併留言的建議）。
 3. `project.config.json` 的 `prompt-template` 登記規則 `when` 改成 `^\\| 版本 \\||需求來源`（本單明確授權只改這一個值），讓放錯在 `prompts/` 底下的批次紀錄也必須登記在索引。
 4. `node tools/task.ts docs-check` 通過。
 
-**影響範圍**
-
-```
-prompts/README.md
-prompts/agent-office-redraw-batch1.md
-prompts/agent-office-redraw-batch2.md
-prompts/agent-office-redraw-batch3.md
-prompts/agent-office-redraw-batch4.md
-prompts/agent-office-redraw-batch5.md
-prompts/agent-office-redraw-fix-1.md
-prompts/batches/agent-office-118.md
-prompts/batches/agent-office-119.md
-prompts/batches/agent-office-120.md
-prompts/batches/agent-office-121.md
-prompts/batches/agent-office-122.md
-prompts/batches/agent-office-119-fix-1.md
-project.config.json
-```
+**影響範圍**：以 art-studio#12 內文的「影響範圍」為準（改名前的舊路徑只列在單上，不寫進本規格，以免規格裡出現已刪除檔的路徑）。
 
 **驗收條件**
 
