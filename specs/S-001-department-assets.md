@@ -4,8 +4,8 @@
 | :--- | :--- |
 | 依據 | [ADR-001](../docs/adr/ADR-001-department-assets.md) |
 | 負責 | art-studio 總規劃（claude.ai 專案「art-studio」的對話，https://claude.ai/code/session_014wJVwstFL3pSvKBbsbftWQ） |
-| 狀態 | ✅ 完成（2026-11-21） |
-| 最後確認 | 2026-11-21 |
+| 狀態 | 進行中（T1、T2 完成；T3 補收編） |
+| 最後確認 | 2026-11-28 |
 
 ## 1. 目標
 
@@ -120,3 +120,57 @@ prompts/README.md
 
 - 不改 `prompts/batches/` 的批次紀錄（ADR-001 第 2 節第 4 點）。
 - 不重畫任何素材、不動需求方倉庫。
+
+## 4.〔T3〕收編重畫批次紀錄、補索引漏洞
+
+**單**：art-studio#12（實作：美編 G1；同時當作 #11 轉成引用模式後的第一張試跑單）
+
+**為什麼**：art-studio#5～#10 的部門檔（需求方已判通過，2026-11-28 合併）放在 `prompts/` 底下、用 `agent-office-redraw-*` 命名，沒照 ADR-001 第 2 節第 1 點放進 `prompts/batches/`，也沒列進 `prompts/README.md`。`docs-check` 沒擋下來，因為 `prompt-template` 登記規則只看開頭有 `| 版本 |` 的檔，`prompt-batch` 只看 `prompts/batches/`，放錯位置的批次紀錄兩邊都掃不到。
+
+**要先完成**：art-studio#11（轉成引用模式；本單的工具流程要在新模式下跑一次）。
+
+**要做的事**
+
+1. 用 `git mv` 改名，內容只改檔內互相引用的相對路徑（例如 `agent-office.md` → `../agent-office.md`、`../skills/` → `../../skills/`）：
+   | 舊檔名 | 新檔名 | 部門單／需求方單 |
+   | :--- | :--- | :--- |
+   | `prompts/agent-office-redraw-batch1.md` | `prompts/batches/agent-office-118.md` | #5／agent-office#118 |
+   | `prompts/agent-office-redraw-batch2.md` | `prompts/batches/agent-office-119.md` | #6／agent-office#119 |
+   | `prompts/agent-office-redraw-batch3.md` | `prompts/batches/agent-office-120.md` | #7／agent-office#120 |
+   | `prompts/agent-office-redraw-batch4.md` | `prompts/batches/agent-office-121.md` | #8／agent-office#121 |
+   | `prompts/agent-office-redraw-batch5.md` | `prompts/batches/agent-office-122.md` | #9／agent-office#122 |
+   | `prompts/agent-office-redraw-fix-1.md` | `prompts/batches/agent-office-119-fix-1.md` | #10／agent-office#119（同一需求單的第二次需求） |
+2. `prompts/README.md` 兩張表補上這六份（批次紀錄的「目前版本」欄填 `—`；範本版本記在批次表）；順手把 #1、#2 兩列的「目前版本」也改成 `—`（#3 合併留言的建議）。
+3. `project.config.json` 的 `prompt-template` 登記規則 `when` 改成 `^\\| 版本 \\||需求來源`（本單明確授權只改這一個值），讓放錯在 `prompts/` 底下的批次紀錄也必須登記在索引。
+4. `node tools/task.ts docs-check` 通過。
+
+**影響範圍**
+
+```
+prompts/README.md
+prompts/agent-office-redraw-batch1.md
+prompts/agent-office-redraw-batch2.md
+prompts/agent-office-redraw-batch3.md
+prompts/agent-office-redraw-batch4.md
+prompts/agent-office-redraw-batch5.md
+prompts/agent-office-redraw-fix-1.md
+prompts/batches/agent-office-118.md
+prompts/batches/agent-office-119.md
+prompts/batches/agent-office-120.md
+prompts/batches/agent-office-121.md
+prompts/batches/agent-office-122.md
+prompts/batches/agent-office-119-fix-1.md
+project.config.json
+```
+
+**驗收條件**
+
+- [ ] 六份新檔存在、舊檔名不存在，`git log --follow` 看得到改名；除了相對路徑外內容與改名前逐字相同，檔內連結都點得開。
+- [ ] `prompts/README.md` 兩張表列出全部八份批次紀錄（含 #1、#2），批次紀錄的「目前版本」欄都是 `—`。
+- [ ] `project.config.json` 與 `main` 相比只改了 `prompt-template` 的 `when`；`docs-check` 通過，且把任一份批次紀錄暫時搬回 `prompts/` 底下、不列索引時 `docs-check` 會失敗（驗收員自行試、不提交）。
+- [ ] 本單的 `worker-name`、`start`、`submit`、`accept`、逐條對照都在引用模式下完成，驗收員在逐條對照寫一行實際用的套件版本。
+- [ ] 沒有圖片；沒有改到影響範圍以外的檔。
+
+**不做**
+
+- 不改批次紀錄的提示詞內容（ADR-001 第 2 節第 4 點）。
