@@ -104,5 +104,72 @@
     "project.config.json",
     "AGENTS.md",
     ".github/**"
+  ],
+  "departments": [
+    {
+      "id": "art",
+      "label": "美編"
+    }
+  ],
+  "roles": [
+    {
+      "id": "lead-planner",
+      "label": "總規劃",
+      "icon": "🤖",
+      "prefix": "L",
+      "actions": [
+        "write-adr",
+        "write-spec",
+        "lock-tests",
+        "dispatch",
+        "answer",
+        "review",
+        "merge"
+      ],
+      "picks": "none",
+      "presence": "wakeable",
+      "reviewGate": "planner",
+      "responseMinutes": 120,
+      "maxTickets": 0
+    },
+    {
+      "id": "spec-owner",
+      "label": "規格負責人",
+      "icon": "🤖",
+      "prefix": "P",
+      "actions": [
+        "write-spec",
+        "lock-tests",
+        "dispatch",
+        "answer",
+        "review",
+        "merge"
+      ],
+      "picks": "none",
+      "presence": "wakeable",
+      "reviewGate": "planner",
+      "responseMinutes": 60,
+      "maxTickets": 0
+    },
+    {
+      "id": "designer",
+      "label": "美編",
+      "icon": "🎨",
+      "prefix": "G",
+      "department": "art",
+      "actions": [
+        "produce-asset",
+        "implement",
+        "submit",
+        "answer"
+      ],
+      "picks": {
+        "label": "role:designer"
+      },
+      "presence": "wakeable",
+      "reviewGate": "user",
+      "responseMinutes": 60,
+      "maxTickets": 1
+    }
   ]
 }

@@ -13,7 +13,7 @@
 
 本倉庫是美編部門（agent-office ADR-004）：累積產圖技能、提示詞與整理流程，替其他專案（需求方）產出像素素材與逐格動畫。
 
-- **實作者是 Codex（ChatGPT）對話，對外稱 `G1`**：用 `task worker-name` 領工具代號 `A<n>`，留言第一行寫 `🎨 G1（A<n>）`；跨倉庫留言寫 `🎨 G1（art-studio）`。Antigravity 不接本倉庫的單。
+- **實作者是 Codex（ChatGPT）對話，對外稱 `G1`**：接需求單與部門單（標 `role:designer`）時用 `node tools/task.ts worker-name --role designer` 領代號 `G<n>`（角色登記在 `project.config.json` 的 `roles`），留言第一行寫 `🎨 <代號>`；沒有角色標籤的套件雜務單才用 `worker-name` 以協調者身分（`A<n>`）處理。跨倉庫留言寫 `🎨 G1（art-studio）`。Antigravity 不接本倉庫的單。
 - **產圖只用內建生圖技能**：不得寫程式呼叫任何生圖 API，也不得付費購買素材包。
 - **需求單**：由需求方的 Claude 開，內文第一段固定是「需求來源：`<owner>/<repo>#<N>`」，附驗收條件與標準樣本（參考圖路徑）。沒有需求來源的單只能是本倉庫自己的技能、流程改進。
 - **交件位置**：成品交到需求方倉庫的 `media` 分支，路徑 `<owner>/<repo>/<N>/<檔名>`（N 是需求方單號），並在本倉庫的單與需求方原單各留交件留言。本倉庫不保存各專案的成品，只保存技能、提示詞、流程與風格樣本。
