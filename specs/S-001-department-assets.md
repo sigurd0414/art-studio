@@ -4,7 +4,7 @@
 | :--- | :--- |
 | 依據 | [ADR-001](../docs/adr/ADR-001-department-assets.md) |
 | 負責 | art-studio 總規劃（claude.ai 專案「art-studio」的對話，https://claude.ai/code/session_014wJVwstFL3pSvKBbsbftWQ） |
-| 狀態 | 進行中（T1、T2 完成；T3 補收編） |
+| 狀態 | ✅ 完成（2026-11-28） |
 | 最後確認 | 2026-11-28 |
 
 ## 1. 目標
@@ -128,6 +128,8 @@ prompts/README.md
 **為什麼**：art-studio#5～#10 的部門檔（需求方已判通過，2026-11-28 合併）放在 `prompts/` 底下、用 `agent-office-redraw-*` 命名，沒照 ADR-001 第 2 節第 1 點放進 `prompts/batches/`，也沒列進 `prompts/README.md`。`docs-check` 沒擋下來，因為 `prompt-template` 登記規則只看開頭有 `| 版本 |` 的檔，`prompt-batch` 只看 `prompts/batches/`，放錯位置的批次紀錄兩邊都掃不到。
 
 **要先完成**：art-studio#11（轉成引用模式；本單的工具流程要在新模式下跑一次）。
+
+**結果**：✅ 2026-11-28 07:4x 合併（bc6236b）。G1 以美編角色（代號 G1）在引用模式（套件 0.3.2）完成接單、交件，驗收員 G1-V 證據包與逐條對照 PASS，負向檢查確認放錯位置的批次紀錄會被登記規則擋下。交件前 G1 自查發現規格寫了已刪除檔的完整路徑，規格改成只寫檔名（fc756aa）。本任務已凍結。
 
 **要做的事**
 
