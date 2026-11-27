@@ -98,5 +98,11 @@
       }
     ]
   },
-  "acceptCommands": []
+  "acceptCommands": [],
+  "autoMergeDenyPaths": [
+    "styles/**",
+    "project.config.json",
+    "AGENTS.md",
+    ".github/**"
+  ]
 }
