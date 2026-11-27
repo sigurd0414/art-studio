@@ -1,1 +1,1 @@
-請遵守 AGENTS.md
+請遵守 AGENTS.md，並依序閱讀它列出的必讀檔。
