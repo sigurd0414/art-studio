@@ -75,7 +75,7 @@
       {
         "id": "prompt-template",
         "files": "prompts/*.md",
-        "when": "^\\| 版本 \\|",
+        "when": "^\\| 版本 \\||需求來源",
         "mustAppearIn": [
           "prompts/README.md"
         ]

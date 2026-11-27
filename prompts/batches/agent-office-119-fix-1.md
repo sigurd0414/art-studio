@@ -2,7 +2,7 @@
 
 版本：1.1。最後確認日期：2026-11-22。
 
-需求來源：[agent-office#119](https://github.com/sigurd0414/agent-office/issues/119)；部門單：[art-studio#10](https://github.com/sigurd0414/art-studio/issues/10)。依單上規則1–8及S-043 T3。整理沿用[原圖去背](../skills/gpt-original-cutout.md)、[牆面方向自檢](../skills/wall-mounted-orientation.md)、[風格來源](../styles/agent-office.md)。
+需求來源：[agent-office#119](https://github.com/sigurd0414/agent-office/issues/119)；部門單：[art-studio#10](https://github.com/sigurd0414/art-studio/issues/10)。依單上規則1–8及S-043 T3。整理沿用[原圖去背](../../skills/gpt-original-cutout.md)、[牆面方向自檢](../../skills/wall-mounted-orientation.md)、[風格來源](../../styles/agent-office.md)。
 
 ## 設計與完整範圍檢查
 
